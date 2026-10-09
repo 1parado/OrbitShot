@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+
+# WorkBuddy 本地工作数据（会话记录 / 记忆 / 任务数据等）
+.workbuddy/
+
+# 环境变量与密钥
+.env
+.env.*
+*.local
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
