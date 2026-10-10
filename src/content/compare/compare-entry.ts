@@ -60,6 +60,31 @@ function readAnswerProbed(s: ActiveSession): string | null {
 }
 
 /**
+ * 清洗抓取到的回答文本：
+ * - 去掉容器误带上的人类消息头（"你说：""XX 说："等，用户消息与回答同容器时出现）
+ * - 去掉页脚水印（"ChatGPT 可能会出错""AI 生成，请注意甄别"类）
+ * - 压平多余空白（textContent 抓取天然丢块级换行，压缩为紧凑文本交 markdown 层）
+ */
+const NOISE_PATTERNS = [
+  /^[^：:]{1,12}说[：:]\s*/, // 「你说：」「ChatGPT 说：」开头
+  /^[A-Za-z ]{1,20} said:\s*/i,
+  /(?:ChatGPT|AI|GLM|Kimi|豆包|文心)[^。·]{0,20}(?:可能会?出错|会犯错|生成[，,]?)\.?[^。]*。?$/, // 免责声明尾巴
+  /(?:内容由?\s*AI\s*生成|查看对话|重新生成|复制|分享|点赞|点踩|举报)$/u, // 操作残留
+]
+
+function cleanAnswerText(raw: string): string {
+  let text = raw.replace(/\u00a0/g, ' ')
+  // 连续两段相同消息头（用户头 + 模型头同容器）时只保留去掉两段头部的内容
+  text = text.replace(NOISE_PATTERNS[0], '').replace(NOISE_PATTERNS[1], '')
+  for (let i = 2; i < NOISE_PATTERNS.length; i++) {
+    text = text.replace(NOISE_PATTERNS[i], '')
+  }
+  // textContent 连读会把块级元素拼成一行；按句读还原基本可读性并压缩空白
+  text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n')
+  return text.trim()
+}
+
+/**
  * 通用启发式回答读取（无 answer 探针 / 探针失效）：
  * 在主内容区找「文本量最大的最后渲染容器」——对话类站点流式回答通常是
  * 最近插入的大文本块。以 contenteditable 输入区的祖先容器为界，避免读到输入框。
@@ -86,12 +111,12 @@ function readAnswerGeneric(s: ActiveSession): string {
     if (el.querySelector('[contenteditable="true"], textarea')) continue
     if (!best || text.length > best.len) best = { el, len: text.length }
   }
-  return best ? (best.el.textContent ?? '').trim() : ''
+  return best ? cleanAnswerText((best.el.textContent ?? '')) : ''
 }
 
 function readAnswer(s: ActiveSession): string {
   const probed = readAnswerProbed(s)
-  return probed ?? readAnswerGeneric(s)
+  return probed !== null ? cleanAnswerText(probed) : readAnswerGeneric(s)
 }
 
 /** 生成中检测：停止按钮可见 */

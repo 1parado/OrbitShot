@@ -24,9 +24,35 @@ export default function CompareApp() {
   const [platforms, setPlatforms] = useState<ComparePlatform[]>([])
   const [showSummary, setShowSummary] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+  const mainRef = useRef<HTMLElement | null>(null)
+  const [mainWidth, setMainWidth] = useState(0)
 
   // Port 订阅：SW 快照驱动
   useEffect(() => connectPort(setBatch), [])
+
+  // 容器宽度测量：窄面板自动减少列数（ResizeObserver 跟随侧边栏拖拽/窗口缩放）
+  useEffect(() => {
+    const el = mainRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setMainWidth(e.contentRect.width)
+    })
+    ro.observe(el)
+    setMainWidth(el.clientWidth)
+    return () => ro.disconnect()
+  }, [])
+
+  /**
+   * 列数 = min(任务数, 宽度允许的列数)：
+   * 每列至少 ~300px 才可读，两栏 ≥620px，三栏 ≥930px；窄侧边栏自动降列。
+   */
+  const cols = useMemo(() => {
+    const n = batch?.tasks.length ?? 0
+    if (n <= 1) return 1
+    if (!mainWidth) return Math.min(n, 3)
+    const fit = Math.max(1, Math.min(3, Math.floor((mainWidth + 10) / 310)))
+    return Math.max(1, Math.min(n, fit))
+  }, [batch?.tasks.length, mainWidth])
 
   // 平台表：名称/图标/URL 元数据（卡片展示用），设置变化时跟随刷新
   useEffect(() => {
@@ -136,18 +162,14 @@ export default function CompareApp() {
         </div>
       )}
 
-      {/* 响应网格：宽度自适应；每卡片独立滚动 */}
-      <main className="sp-scroll mt-2.5 min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+      {/* 响应网格：按任务数分列（1/2/3 列），窄面板自动降列；每卡片独立滚动 */}
+      <main ref={mainRef} className="sp-scroll mt-2.5 min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         {!batch || !batch.tasks.length ? (
           <EmptyState lang={lang} />
         ) : (
           <div
-            className="grid h-full gap-2.5"
-            style={{
-              gridTemplateRows: 'minmax(240px, 1fr)',
-              gridAutoFlow: 'column',
-              gridAutoColumns: 'minmax(250px, 1fr)',
-            }}
+            className="grid h-full items-stretch gap-2.5"
+            style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
           >
             {batch.tasks.map((tk) => {
               const p = platformOf(tk.aiId)

@@ -16,7 +16,7 @@ function esc(s: string): string {
     .replace(/'/g, '&#39;')
 }
 
-/** 行内元素：代码 / 粗体 / 斜体 / 删除线 / 链接（均先转义再包装） */
+/** 行内元素：图片 / 代码 / 粗体 / 斜体 / 删除线 / 链接（均先转义再包装） */
 function inline(s: string): string {
   let out = esc(s)
   // 行内代码（先处理，避免内部被加粗等二次解析）
@@ -25,8 +25,17 @@ function inline(s: string): string {
     codes.push('<code>' + c + '</code>')
     return '\u0000' + (codes.length - 1) + '\u0000'
   })
+  // 图片：仅 http(s)，限宽 + 懒加载 + 点击新开（在 <a> 包装下仍可点击）
+  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, (_m, alt, src) => {
+    const u = String(src)
+    if (!/^https?:\/\//i.test(u)) return alt // 非 http(s) 图片降级为纯文本
+    return (
+      '<img src="' + u + '" alt="' + alt + '" loading="lazy" ' +
+      'referrerpolicy="no-referrer" class="sp-md-img" ' +
+      'data-href="' + u + '" />'
+    )
+  })
   out = out
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, (_m, alt) => '<span title="image">' + alt + '</span>')
     .replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (_m, label, href) => {
       const u = String(href)
       if (!/^https?:\/\//i.test(u)) return label // 非http(s) 链接降级为纯文本
@@ -41,7 +50,7 @@ function inline(s: string): string {
   return out
 }
 
-/** 块级解析：代码块 / 标题 / 列表 / 表格 / 引用 / 分隔线 / 段落 */
+/** 块级解析：代码块 / 标题 / 列表 / 表格 / 引用 / 分隔线 / 图片独立行 / 段落 */
 export function renderMarkdown(src: string): string {
   const lines = src.replace(/\r\n/g, '\n').split('\n')
   const html: string[] = []
@@ -71,6 +80,22 @@ export function renderMarkdown(src: string): string {
           '</code></pre>'
       )
       continue
+    }
+
+    // 独立成行的图片：![alt](url) → <figure>（可点击放大到新标签页）
+    const imgLine = line.trim().match(/^!\[([^\]]*)\]\(([^)\s]+)[^)]*\)$/)
+    if (imgLine) {
+      const u = imgLine[2]
+      if (/^https?:\/\//i.test(u)) {
+        html.push(
+          '<figure class="sp-md-fig"><img src="' + u + '" alt="' + esc(imgLine[1]) +
+          '" loading="lazy" referrerpolicy="no-referrer" class="sp-md-img" data-href="' + u + '" />' +
+          (imgLine[1] ? '<figcaption>' + esc(imgLine[1]) + '</figcaption>' : '') +
+          '</figure>'
+        )
+        i++
+        continue
+      }
     }
 
     // 标题

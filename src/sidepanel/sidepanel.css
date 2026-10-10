@@ -109,6 +109,7 @@ body {
   display: block;
   overflow-x: auto;
   max-width: 100%;
+  white-space: nowrap; /* 单元格不折行，表格横向滚动保持列结构 */
 }
 .sp-md th,
 .sp-md td {
@@ -129,6 +130,29 @@ body {
   border: none;
   border-top: 1px solid rgba(15, 23, 42, 0.1);
   margin: 0.8em 0;
+}
+
+/* ---- 图片（AI 回复内嵌图） ---- */
+.sp-md img.sp-md-img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  cursor: zoom-in;
+  background:
+    conic-gradient(#f1f5f9 25%, #fff 0 50%, #f1f5f9 0 75%, #fff 0) 0 0/16px 16px; /* 透明底棋盘格 */
+}
+.sp-md figure.sp-md-fig {
+  margin: 0.6em 0;
+}
+.sp-md figure.sp-md-fig figcaption {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: center;
 }
 
 /* ---- 流式光标动画 ---- */
@@ -174,5 +198,43 @@ body {
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+/* ---- 暗色适配（跟随系统，tailwind darkMode: media） ---- */
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #e2e8f0;
+    background:
+      radial-gradient(1200px 500px at -10% -20%, rgba(14, 116, 144, 0.18), transparent 60%),
+      radial-gradient(900px 420px at 110% 120%, rgba(6, 95, 70, 0.14), transparent 55%),
+      #0b1220;
+  }
+  .glass {
+    background: rgba(15, 23, 42, 0.72);
+    border-color: rgba(148, 163, 184, 0.12);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+  .sp-scroll::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.25);
+  }
+  .sp-md code {
+    background: rgba(148, 163, 184, 0.16);
+  }
+  .sp-md pre {
+    background: #020617;
+  }
+  .sp-md blockquote {
+    color: #94a3b8;
+  }
+  .sp-md th,
+  .sp-md td {
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+  .sp-md th {
+    background: rgba(148, 163, 184, 0.08);
+  }
+  .sp-md img.sp-md-img {
+    border-color: rgba(148, 163, 184, 0.16);
   }
 }

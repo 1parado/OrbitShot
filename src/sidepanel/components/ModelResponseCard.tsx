@@ -132,8 +132,18 @@ export default function ModelResponseCard(props: {
         </span>
       </div>
 
-      {/* 内容 */}
-      <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2">
+      {/* 内容：图片点击放大（事件委托，data-href 由渲染层白名单生成） */}
+      <div
+        className="sp-scroll min-h-0 flex-1 overflow-y-auto px-3 py-2"
+        onClick={(e) => {
+          const img = (e.target as HTMLElement).closest('img[data-href]')
+          const href = img?.getAttribute('data-href')
+          if (href && /^https?:\/\//i.test(href)) {
+            e.preventDefault()
+            chrome.tabs.create({ url: href })
+          }
+        }}
+      >
         {task.error ? (
           <div className="rounded-lg bg-red-50/90 px-2.5 py-2 text-[11.5px] leading-5 text-red-600 ring-1 ring-red-100">
             {t(lang, 'cmp.err.prefix')}
