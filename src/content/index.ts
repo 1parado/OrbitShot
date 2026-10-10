@@ -334,21 +334,22 @@ function showComparePrompt(shadow: ShadowRoot, sites: AiSite[]): Promise<string 
   })
 }
 
-/** 批量发送：确认 AI 列表后当场输入问题，文本+截图一起逐站提交（compareMode 开启时进入对比） */
+/** 批量发送：compareMode 开启且 ≥2 平台时当场输入问题，文本+截图一起逐站提交并对比；关闭则完全原行为 */
 async function sendToSites(
   shadow: ShadowRoot,
   canvas: HTMLCanvasElement,
   siteIds: string[]
 ): Promise<void> {
-  const { aiList } = await loadSettings()
+  const { aiList, compareMode } = await loadSettings()
   const sites = siteIds
     .map((id) => aiList.find((s) => s.id === id.replace(/^ai:/, '')))
     .filter((s): s is AiSite => !!s)
   if (!sites.length) return
 
-  // 对比模式：≥2 平台时先弹输入框（问题与截图一起发送）；取消则中止整个批量
+  // 对比模式唯一入口：开关开启 + ≥2 平台 → 当场弹输入框（问题与截图一起发送）；取消则中止
+  // 开关关闭 → 无输入框、无文本提交、无对比面板，与原有批量行为完全一致
   let prompt = ''
-  const isCompare = sites.length >= 2
+  const isCompare = compareMode === true && sites.length >= 2
   if (isCompare) {
     const input = await showComparePrompt(shadow, sites)
     if (input === null) return
@@ -356,9 +357,11 @@ async function sendToSites(
   }
 
   toast(shadow, t(lang, 'toast.sending', { n: sites.length }))
-  const batch = isCompare
-    ? { aiIds: sites.map((s) => s.id), batchKey: crypto.randomUUID(), prompt }
-    : undefined
+  // prompt 为空（用户留空）= 纯批量注入，不带对比上下文
+  const batch =
+    isCompare && prompt
+      ? { aiIds: sites.map((s) => s.id), batchKey: crypto.randomUUID(), prompt }
+      : undefined
   for (const s of sites) {
     await sendToAi(shadow, canvas, s, batch)
   }

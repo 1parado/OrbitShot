@@ -187,21 +187,28 @@ function okStatus(s?: InjectResult['status']): boolean {
   return s === 'inserted' || s === 'pasted-unverified'
 }
 
-/** host → 对比平台 id（仅三个主流站支持自动提交文本；其余站仅展示注入结果） */
-function compareAiIdForUrl(url: string): string | null {
+/** 按 URL 匹配用户 AI 列表中的平台 id（所有站均支持自动提交文本） */
+async function compareAiIdForUrl(url: string): Promise<string | null> {
   try {
-    const host = new URL(url).hostname
-    if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com')) return 'chatgpt'
-    if (host === 'claude.ai' || host.endsWith('.claude.ai')) return 'claude'
-    if (host === 'gemini.google.com') return 'gemini'
+    const target = new URL(url)
+    const s = await loadSettings()
+    const hit = s.aiList.find((a) => {
+      try {
+        const u = new URL(a.url)
+        return u.hostname === target.hostname
+      } catch {
+        return false
+      }
+    })
+    return hit?.id ?? null
   } catch {
-    /* ignore */
+    return null
   }
-  return null
 }
 
 /**
  * 对比模式核心：截图已注入该站标签页 → 在同一页提交用户问题并开始观察回答。
+ * 所有 AI 站均支持（aiId 由用户列表按 url 匹配，含自定义站）。
  * 失败只标记该站任务，不影响其他站；compareMode 关闭 / 无问题文本时直接跳过（原行为）。
  */
 async function noteCompareBatch(
@@ -213,8 +220,11 @@ async function noteCompareBatch(
     const s = await loadSettings()
     if (s.compareMode !== true) return
     if (!batch.prompt) return // 用户没输入问题：纯批量注入（原行为），不进对比
-    const aiId = compareAiIdForUrl(url)
-    if (!aiId) return // 非三个支持站：不自动提交文本
+    const aiId = await compareAiIdForUrl(url)
+    if (!aiId) {
+      console.info('[compare] site not in AI list, skip text submit:', url)
+      return
+    }
     const out = await attachScreenshotTask({
       aiId,
       prompt: batch.prompt,
