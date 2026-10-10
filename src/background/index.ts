@@ -15,13 +15,13 @@ import {
   attachComparePort,
   recoverOrphans,
   loadCurrentBatch,
+  attachScreenshotTask,
+  finishScreenshotBatch,
 } from './compare/dispatcher'
 import type {
-  ComparePendingContext,
   DispatchBatchPayload,
   BatchStateSnapshot,
 } from '../shared/compare-types'
-import { COMPARE_PENDING_KEY } from '../shared/compare-types'
 
 export interface CaptureResp {
   ok: boolean
@@ -109,10 +109,11 @@ interface SendToAiMsg {
   /** 多图（暂存区批量分发：只传 id，图片由 SW 从 IndexedDB 读取，避免大体积过消息通道） */
   shotIds?: string[]
   /**
-   * 多平台批量发送上下文（content 在确认批量时生成）：
-   * aiIds = 本批全部平台；batchKey = 批次标识。注入成功后记录对比 pending。
+   * 多平台批量发送上下文（content 确认批量时生成）：
+   * aiIds = 本批全部平台；batchKey = 批次标识；prompt = 用户当场输入的问题
+   * （空串 = 用户未输入，走纯批量注入，不进对比）。
    */
-  batchSend?: { aiIds: string[]; batchKey: string }
+  batchSend?: { aiIds: string[]; batchKey: string; prompt: string }
 }
 
 /** 软等待标签页加载完成（超时不阻塞——注入函数内部还会轮询编辑器就绪） */
@@ -172,10 +173,9 @@ async function handleSendToAi(msg: SendToAiMsg): Promise<{ ok: boolean; status?:
       args: [dataUrls, 30000, lang ?? 'zh-CN'],
     })
     const r = results?.[0]?.result as InjectResult | undefined
-    // 多模型对比：批量发送（暂存区多图 / 环形菜单 Ctrl 多选）成功后记录上下文；
-    // 侧边栏延迟到 COMPARE_BATCH_DONE 再打开。compareMode 关闭时直接跳过，行为不变
+    // 多模型对比：批量（≥2 平台）且开关开启且有问题时，注入截图成功 → 同标签页提交问题并观察
     if (okStatus(r?.status) && msg.batchSend) {
-      await noteCompareBatch(msg.batchSend)
+      await noteCompareBatch(msg.batchSend, tabId, msg.url)
     }
     return { ok: true, status: r?.status ?? 'error', detail: r?.detail }
   } catch (e) {
@@ -187,47 +187,43 @@ function okStatus(s?: InjectResult['status']): boolean {
   return s === 'inserted' || s === 'pasted-unverified'
 }
 
+/** host → 对比平台 id（仅三个主流站支持自动提交文本；其余站仅展示注入结果） */
+function compareAiIdForUrl(url: string): string | null {
+  try {
+    const host = new URL(url).hostname
+    if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com')) return 'chatgpt'
+    if (host === 'claude.ai' || host.endsWith('.claude.ai')) return 'claude'
+    if (host === 'gemini.google.com') return 'gemini'
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
 /**
- * 对比模式辅助：首条成功消息一次性写入完整平台列表（content 已确认批量），
- * 后续同 batchKey 的消息跳过；COMPARE_BATCH_DONE 时若 pending 仍存在（未消费）
- * 且平台 ≥2，打开侧边栏。单平台批量 / compareMode 关闭 → 无 pending，行为不变。
+ * 对比模式核心：截图已注入该站标签页 → 在同一页提交用户问题并开始观察回答。
+ * 失败只标记该站任务，不影响其他站；compareMode 关闭 / 无问题文本时直接跳过（原行为）。
  */
-async function noteCompareBatch(batch: { aiIds: string[]; batchKey: string }): Promise<void> {
+async function noteCompareBatch(
+  batch: { aiIds: string[]; batchKey: string; prompt: string },
+  tabId: number,
+  url: string
+): Promise<void> {
   try {
     const s = await loadSettings()
     if (s.compareMode !== true) return
-    if (batch.aiIds.length < 2) return
-    const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
-    const existing = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
-    if (existing?.batchKey === batch.batchKey) return // 同批次后续消息：已记录
-    const ctx: ComparePendingContext = {
-      aiIds: batch.aiIds,
+    if (!batch.prompt) return // 用户没输入问题：纯批量注入（原行为），不进对比
+    const aiId = compareAiIdForUrl(url)
+    if (!aiId) return // 非三个支持站：不自动提交文本
+    const out = await attachScreenshotTask({
+      aiId,
+      prompt: batch.prompt,
+      tabId,
       batchKey: batch.batchKey,
-      at: Date.now(),
-    }
-    await chrome.storage.local.set({ [COMPARE_PENDING_KEY]: ctx })
-  } catch {
-    // 对比辅助失败不影响主流程
-  }
-}
-
-/** 批量发送结束：pending 仍在（侧栏未消费）则打开侧边栏让用户输入共同问题 */
-async function finishCompareBatch(batchKey: string): Promise<void> {
-  try {
-    const s = await loadSettings()
-    if (s.compareMode !== true) {
-      console.info('[compare] batch done but compareMode off — skip panel')
-      return
-    }
-    const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
-    const ctx = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
-    if (!ctx || ctx.batchKey !== batchKey || ctx.aiIds.length < 2) {
-      console.info('[compare] batch done, no pending context (single send or already consumed)')
-      return
-    }
-    await openCompareSidePanel()
+    })
+    if (!out.ok) console.warn('[compare] attach task failed:', out.error)
   } catch (e) {
-    console.error('[compare] finishCompareBatch failed:', e)
+    console.warn('[compare] noteCompareBatch error:', e)
   }
 }
 
@@ -283,10 +279,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {  if (msg?.
     return true // async
   }
 
-  // 多平台批量发送结束：pending 未被消费时打开对比侧边栏
+  // 多平台批量发送结束：有对比任务登记时打开面板（纯注入批次不打开）
   if (msg?.type === 'COMPARE_BATCH_DONE') {
-    finishCompareBatch(String(msg.batchKey || ''))
-      .then(() => sendResponse({ ok: true }))
+    finishScreenshotBatch(String(msg.batchKey || ''))
+      .then(async (hasTasks) => {
+        if (hasTasks) await openCompareSidePanel()
+        sendResponse({ ok: true })
+      })
       .catch(() => sendResponse({ ok: true }))
     return true
   }

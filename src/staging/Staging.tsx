@@ -336,11 +336,7 @@ export default function Staging() {
   )
 
   // ---- 分发：逐个 AI 顺序执行，状态独立，失败可单独重试 ----
-  const sendTo = async (
-    site: AiSite,
-    ids: string[],
-    batch?: { aiIds: string[]; batchKey: string }
-  ) => {
+  const sendTo = async (site: AiSite, ids: string[]) => {
     setStatus((p) => ({ ...p, [site.id]: { state: 'sending' } }))
     try {
       const resp = (await chrome.runtime.sendMessage({
@@ -348,8 +344,6 @@ export default function Staging() {
         url: site.url,
         name: site.name,
         shotIds: ids,
-        // 多平台批量：SW 注入成功后记录对比上下文（compareMode 开启时）
-        ...(batch ? { batchSend: batch } : {}),
       })) as { ok?: boolean; status?: string; detail?: string; error?: string }
       const state: SendState = !resp?.ok
         ? 'failed'
@@ -369,20 +363,8 @@ export default function Staging() {
     if (busy || !selectedIds.length || !aiSel.size) return
     setBusy(true)
     const sites = aiSites.filter((s) => aiSel.has(s.id))
-    // 多平台批量：一次性带完整平台列表（SW 写对比 pending），全部结束后开对比面板
-    const batch =
-      sites.length >= 2
-        ? { aiIds: sites.map((s) => s.id), batchKey: crypto.randomUUID() }
-        : undefined
     for (const site of sites) {
-      await sendTo(site, selectedIds, batch) // 顺序执行：避免多标签页同时注入互相抢焦点
-    }
-    if (batch) {
-      try {
-        await chrome.runtime.sendMessage({ type: 'COMPARE_BATCH_DONE', batchKey: batch.batchKey })
-      } catch {
-        /* 忽略 */
-      }
+      await sendTo(site, selectedIds) // 顺序执行：避免多标签页同时注入互相抢焦点
     }
     setBusy(false)
   }

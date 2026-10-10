@@ -170,6 +170,87 @@ export async function dispatchBatch(payload: {
   return { ok: true, batchId }
 }
 
+/**
+ * 截图批量发送路径：SEND_TO_AI 注入成功后，把该站登记为对比任务并在
+ * **同一标签页**上提交问题（页面已加载完成，无需 dispatcher 再开页）。
+ * 后续流式事件沿用统一上行通道；超时/取消/重试也复用现有机制。
+ */
+export async function attachScreenshotTask(opts: {
+  aiId: CompareAiId
+  prompt: string
+  tabId: number
+  batchKey: string
+  timeoutMs?: number
+}): Promise<{ ok: boolean; error?: string }> {
+  const prompt = opts.prompt?.trim()
+  if (!prompt) return { ok: false, error: 'PROMPT_EMPTY' }
+
+  // 一个 batchKey 建一个 batch（首站创建，后续站追加任务）
+  let batch = screenshotBatches.get(opts.batchKey)
+  if (!batch) {
+    batch = {
+      batchId: opts.batchKey,
+      prompt,
+      createdAt: Date.now(),
+      tasks: [],
+    }
+    screenshotBatches.set(opts.batchKey, batch)
+    await saveBatch(batch)
+    broadcastSnapshot(batch)
+  }
+  // 同站重复消息（理论不会有）忽略
+  if (batch.tasks.some((t) => t.aiId === opts.aiId)) return { ok: true }
+
+  const task: CompareTask = {
+    batchId: batch.batchId,
+    requestId: crypto.randomUUID(),
+    aiId: opts.aiId,
+    attempt: 1,
+    status: 'submitting',
+    response: '',
+  }
+  batch.tasks.push(task)
+  await saveBatch(batch)
+  broadcastSnapshot(batch)
+
+  const r: Running = { batch, requestId: task.requestId, attempt: 1, tabId: opts.tabId }
+  running.set(task.requestId, r)
+
+  // 同页直接提交（页面已由注入流程加载完毕）
+  try {
+    const resp = (await chrome.tabs.sendMessage(opts.tabId, {
+      type: 'SUBMIT_PROMPT',
+      batchId: batch.batchId,
+      requestId: task.requestId,
+      aiId: opts.aiId,
+      attempt: 1,
+      timestamp: Date.now(),
+      payload: { prompt, requestId: task.requestId, attempt: 1, aiId: opts.aiId },
+    })) as { ok: boolean; error?: string } | undefined
+    if (!resp?.ok) throw new Error(resp?.error || 'SUBMIT_FAILED')
+    r.timer = setTimeout(() => {
+      void handleTimeout(batch!, task.requestId)
+    }, opts.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS)
+    return { ok: true }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    await finalizeFailed(batch, task.requestId, msg)
+    return { ok: false, error: msg }
+  }
+}
+
+/** 截图批次全部站点处理完毕（COMPARE_BATCH_DONE）：清登记表并打开面板 */
+const screenshotBatches = new Map<string, CompareBatch>()
+
+export async function finishScreenshotBatch(batchKey: string): Promise<boolean> {
+  const batch = screenshotBatches.get(batchKey)
+  if (!batch) return false // 非 compareMode 批次（无登记）→ 不开面板
+  // 延迟一点打开：让首批 GENERATION_STARTED 先推送，面板打开即有内容
+  await new Promise((r) => setTimeout(r, 800))
+  broadcastSnapshot(batch)
+  return true
+}
+
 /** 单任务全生命周期：开页 → 等 CS → 提交 → 等流式事件（事件驱动，非轮询） */
 async function runTask(batch: CompareBatch, task: CompareTask, timeoutMs: number): Promise<void> {
   const requestId = task.requestId

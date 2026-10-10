@@ -217,7 +217,12 @@ async function stashShot(
 }
 
 /** 发送到单个 AI：剪贴板兜底复制 → 后台开/复用标签页并自动注入 → 按真实结果提示 */
-async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiSite, batch?: { aiIds: string[]; batchKey: string }): Promise<void> {
+async function sendToAi(
+  shadow: ShadowRoot,
+  canvas: HTMLCanvasElement,
+  site: AiSite,
+  batch?: { aiIds: string[]; batchKey: string; prompt: string }
+): Promise<void> {
   let copied = true
   try {
     await copyCanvas(canvas)
@@ -232,7 +237,7 @@ async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiS
       url: site.url,
       name: site.name,
       dataUrl,
-      // 多平台批量：SW 据此记录对比上下文（compareMode 开启时）；首条携带完整平台列表
+      // 多平台批量：SW 注入截图成功后接着提交问题文本并观察回答（compareMode 开启时）
       ...(batch ? { batchSend: batch } : {}),
     })) as { ok?: boolean; status?: string; error?: string } | null
   } catch {
@@ -257,7 +262,79 @@ async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiS
   }
 }
 
-/** 批量发送：逐个完成「开页 → 注入 → 验证」，互不串线 */
+/**
+ * 多模型对比：批量确认后当场弹出输入框，问题文本与截图一起提交。
+ * 返回 null 表示用户取消（不发送）。
+ */
+function showComparePrompt(shadow: ShadowRoot, sites: AiSite[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    const box = document.createElement('div')
+    box.className = 'os-cmp-box'
+
+    const title = document.createElement('div')
+    title.className = 'os-cmp-box-title'
+    title.textContent = t(lang, 'cmp.send.title')
+
+    const chips = document.createElement('div')
+    chips.className = 'os-cmp-chips'
+    for (const s of sites) {
+      const chip = document.createElement('span')
+      chip.className = 'os-cmp-chip'
+      const icon = iconForSite(s.id)
+      if (icon) {
+        const img = document.createElement('img')
+        img.src = icon
+        img.alt = ''
+        chip.appendChild(img)
+      }
+      chip.appendChild(document.createTextNode(s.name))
+      chips.appendChild(chip)
+    }
+
+    const ta = document.createElement('textarea')
+    ta.className = 'os-cmp-text'
+    ta.placeholder = t(lang, 'cmp.ph')
+    ta.rows = 3
+
+    const actions = document.createElement('div')
+    actions.className = 'os-cmp-actions'
+    const cancelBtn = document.createElement('button')
+    cancelBtn.className = 'os-cmp-btn os-cmp-btn-cancel'
+    cancelBtn.textContent = t(lang, 'cmp.send.cancel')
+    const sendBtn = document.createElement('button')
+    sendBtn.className = 'os-cmp-btn os-cmp-btn-send'
+    sendBtn.textContent = t(lang, 'cmp.send.go')
+
+    const hint = document.createElement('div')
+    hint.className = 'os-cmp-hint'
+    hint.textContent = t(lang, 'cmp.send.hint')
+
+    const done = (v: string | null) => {
+      box.remove()
+      resolve(v)
+    }
+    cancelBtn.addEventListener('click', () => done(null))
+    sendBtn.addEventListener('click', () => done(ta.value.trim()))
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault()
+        done(ta.value.trim())
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        done(null)
+      }
+    })
+
+    actions.append(cancelBtn, sendBtn)
+    box.append(title, chips, ta, actions, hint)
+    shadow.appendChild(box)
+    ta.focus()
+  })
+}
+
+/** 批量发送：确认 AI 列表后当场输入问题，文本+截图一起逐站提交（compareMode 开启时进入对比） */
 async function sendToSites(
   shadow: ShadowRoot,
   canvas: HTMLCanvasElement,
@@ -268,13 +345,20 @@ async function sendToSites(
     .map((id) => aiList.find((s) => s.id === id.replace(/^ai:/, '')))
     .filter((s): s is AiSite => !!s)
   if (!sites.length) return
+
+  // 对比模式：≥2 平台时先弹输入框（问题与截图一起发送）；取消则中止整个批量
+  let prompt = ''
+  const isCompare = sites.length >= 2
+  if (isCompare) {
+    const input = await showComparePrompt(shadow, sites)
+    if (input === null) return
+    prompt = input
+  }
+
   toast(shadow, t(lang, 'toast.sending', { n: sites.length }))
-  // 多平台批量：首条消息携带完整平台列表（一次性写入 pending，无窗口累积竞态），
-  // 全部发送结束后通知 SW 开侧边栏；单平台保持原有行为
-  const batch =
-    sites.length >= 2
-      ? { aiIds: sites.map((s) => s.id), batchKey: crypto.randomUUID() }
-      : undefined
+  const batch = isCompare
+    ? { aiIds: sites.map((s) => s.id), batchKey: crypto.randomUUID(), prompt }
+    : undefined
   for (const s of sites) {
     await sendToAi(shadow, canvas, s, batch)
   }

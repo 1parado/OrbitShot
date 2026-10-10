@@ -1,5 +1,8 @@
 /* OrbitShot 侧边栏（多模型对比工作台）
    风格：浅色液态玻璃、低噪声、无紫色主色调（跟随 popup / staging 既有视觉） */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 html,
 body {

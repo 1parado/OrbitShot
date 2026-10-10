@@ -154,16 +154,6 @@ export const COMPARE_PORT = 'orbitshot-compare'
 export const COMPARE_STORAGE_PREFIX = 'orbitshot.compare.'
 export const COMPARE_CURRENT_KEY = COMPARE_STORAGE_PREFIX + 'current'
 export const COMPARE_HISTORY_KEY = COMPARE_STORAGE_PREFIX + 'history'
-/** 批量发送截图后待对比上下文（SW 写入，侧边栏读后即删） */
-export const COMPARE_PENDING_KEY = COMPARE_STORAGE_PREFIX + 'pending'
-
-export interface ComparePendingContext {
-  /** 本批次的全部平台（content 确认批量时一次性给定，无窗口累积） */
-  aiIds: string[]
-  /** 批次标识：同批次后续消息据此识别，侧栏只消费一次 */
-  batchKey: string
-  at: number
-}
 
 /** 单次任务默认超时 */
 export const DEFAULT_TASK_TIMEOUT_MS = 120_000
