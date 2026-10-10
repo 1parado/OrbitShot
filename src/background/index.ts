@@ -18,6 +18,7 @@ import {
   loadCurrentBatch,
   attachScreenshotTask,
   finishScreenshotBatch,
+  setPanelOpener,
 } from './compare/dispatcher'
 import type {
   DispatchBatchPayload,
@@ -425,6 +426,10 @@ chrome.runtime.onConnect.addListener(attachComparePort)
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: false })
   .catch(() => {})
+// 对比首站登记成功即开面板（dispatcher 回调，避免跨模块依赖 sidePanel）
+setPanelOpener(() => {
+  openCompareSidePanel().catch((e) => console.warn('[compare] panel open failed:', e))
+})
 recoverOrphans()
 
 /**

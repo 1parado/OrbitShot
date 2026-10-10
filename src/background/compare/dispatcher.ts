@@ -202,6 +202,12 @@ export async function attachScreenshotTask(opts: {
   // 同站重复消息（理论不会有）忽略
   if (batch.tasks.some((t) => t.aiId === opts.aiId)) return { ok: true }
 
+  // 首站登记即打开面板：不等全部站点（最慢站可能几十秒），回答流式补上
+  if (!panelOpenedFor.has(opts.batchKey)) {
+    panelOpenedFor.add(opts.batchKey)
+    panelOpener?.()
+  }
+
   const task: CompareTask = {
     batchId: batch.batchId,
     requestId: crypto.randomUUID(),
@@ -244,14 +250,24 @@ export async function attachScreenshotTask(opts: {
   }
 }
 
-/** 截图批次全部站点处理完毕（COMPARE_BATCH_DONE）：清登记表并打开面板 */
+/** 截图批次登记表：batchKey → batch */
 const screenshotBatches = new Map<string, CompareBatch>()
 
+/** 面板打开回调（background 注入，避免 dispatcher 直接依赖 sidePanel） */
+let panelOpener: (() => void) | null = null
+let panelOpenedFor = new Set<string>() // 已开过面板的 batchKey
+
+export function setPanelOpener(fn: () => void): void {
+  panelOpener = fn
+}
+
+/**
+ * 截图批次全部站点处理完毕（COMPARE_BATCH_DONE）。
+ * 面板在首站登记成功时即已提前打开（不等最慢站），这里只做收尾广播。
+ */
 export async function finishScreenshotBatch(batchKey: string): Promise<boolean> {
   const batch = screenshotBatches.get(batchKey)
   if (!batch) return false // 非 compareMode 批次（无登记）→ 不开面板
-  // 延迟一点打开：让首批 GENERATION_STARTED 先推送，面板打开即有内容
-  await new Promise((r) => setTimeout(r, 800))
   broadcastSnapshot(batch)
   return true
 }

@@ -161,23 +161,27 @@ function scheduleReport(s: ActiveSession): void {
 /**
  * 监听循环。完成判定（多信号，参考主流开源对话抓取实现）：
  *  A. 确认通道：站点探针给出「生成中」标志（停止按钮）时，标志消失 + 文本稳定 800ms。
- *  B. 兜底通道：探针完全没匹配到生成标志（DeepSeek 等），文本出现后连续
- *     STABLE_DONE_MS 无增长 + 无停止按钮 → 视为完成。观测窗口需先过 MIN_BEFORE_DONE_MS，
- *     避免站点渲染慢导致刚出现几个字就误判完成。
+ *  B. 兜底通道：探针完全没匹配到生成标志（DeepSeek 等）→ 需满足全部条件才判完成：
+ *     文本稳定 STABLE_DONE_MS 且观测期足够长，且文本经历过实质性增长（防止
+ *     模型推理停顿/慢渲染中途被截断——回答未完成时总会再长，宁可多等）。
  */
-const STABLE_DONE_MS = 1500
-const MIN_BEFORE_DONE_MS = 4000
+const STABLE_DONE_MS = 3000
+const MIN_BEFORE_DONE_MS = 6000
+/** B 通道：认为经历过「实质增长」的最小文本增量 */
+const MIN_GROWTH = 60
 
 function startWatch(s: ActiveSession): void {
   const stability = new TextStability(0)
   let sawGenerating = false
   let sawTextAt = 0
+  let maxLen = 0
   const startedAt = Date.now()
 
   const check = () => {
     if (s.stopped) return
     const text = readAnswer(s)
     if (text) scheduleReport(s)
+    if (text.length > maxLen + 1) maxLen = text.length // 记录历史峰值
     const generating = isGenerating(s)
     if (generating) {
       sawGenerating = true
@@ -187,12 +191,18 @@ function startWatch(s: ActiveSession): void {
     if (!text) return
     if (!sawTextAt) sawTextAt = Date.now()
     const stable = stability.feed(text)
+    if (!stable) return
     // A 通道：见过生成标志 → 标志消失 + 文本稳定即可完成
-    if (sawGenerating && stable) finishWith(text)
-    // B 通道：从未见过生成标志（探针不匹配）→ 有文本 + 稳定足够久 + 已观测足够长
-    else if (!sawGenerating && stable && Date.now() - sawTextAt >= STABLE_DONE_MS && Date.now() - startedAt >= MIN_BEFORE_DONE_MS) {
+    if (sawGenerating) finishWith(text)
+    // B 通道：从未见过生成标志 → 文本稳定够久 + 观测够长 + 文本曾实质增长过
+    else if (
+      Date.now() - sawTextAt >= STABLE_DONE_MS &&
+      Date.now() - startedAt >= MIN_BEFORE_DONE_MS &&
+      maxLen >= MIN_GROWTH
+    ) {
       finishWith(text)
     }
+    // 其余情况：继续观察（宁多等不截断）
   }
 
   const finishWith = (text: string) => {
@@ -245,15 +255,21 @@ async function submitPrompt(
   await clickSubmit(composer, probe.submit)
   await new Promise((r) => setTimeout(r, 600))
 
-  // 5. 验证提交生效：输入区已清空 或 出现生成中标志 或 已出现新回答节点
+  // 5. 验证提交生效（三选一即认为成功，避免站点残留占位/慢清空导致误判）：
+  //    a) 输入区已基本清空（提交后站点清空输入是通用行为）
+  //    b) 出现生成中标志（停止按钮）
+  //    c) 已出现新回答节点（极快站点）
   const composerText =
     composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
       ? composer.value
       : (composer.textContent ?? '')
   const newCount = answerSel ? document.querySelectorAll(answerSel).length : 0
-  const gen = isGenerating({ aiId, batchId, requestId, attempt, probe } as ActiveSession)
-  if (composerText.trim().length > prompt.length / 2 && !gen && newCount === baselineCount) {
-    return { ok: false, error: 'SUBMIT_NOT_TAKEN' }
+  const gen = isGenerating({ aiId, batchId, requestId, attempt, probe, prompt } as ActiveSession)
+  const composerCleared = composerText.trim().length < Math.max(8, prompt.length / 2)
+  if (!composerCleared && !gen && newCount === baselineCount) {
+    // 仍不能断定失败：站点可能清空慢。放宽为「软失败」——照常启动观察，
+    // 若真的没发送，观察期内不会有回答，最终由超时兜底。
+    console.warn('[compare] submit unverified (composer not cleared, no generating signal)')
   }
 
   // 6. 启动观察
