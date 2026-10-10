@@ -22,6 +22,8 @@ interface ActiveSession {
   requestId: string
   attempt: number
   probe: DomProbe
+  /** 本次提交的问题（用于剥离回答容器里的问题回显） */
+  prompt: string
   observer: MutationObserver
   pollTimer: ReturnType<typeof setInterval> | null
   reportTimer: ReturnType<typeof setTimeout> | null
@@ -49,21 +51,22 @@ function disposeSession(): void {
   session = null
 }
 
-/** 已知探针：回答节点列表的最后一个 = 本次回答 */
+/** 已知探针：回答节点列表的最后一个 = 本次回答。用 innerText 保留块级换行 */
 function readAnswerProbed(s: ActiveSession): string | null {
   for (const sel of s.probe.answer ?? []) {
     const nodes = document.querySelectorAll(sel)
     if (!nodes.length) continue
-    return (nodes[nodes.length - 1].textContent ?? '').trim()
+    const el = nodes[nodes.length - 1] as HTMLElement
+    return (el.innerText ?? el.textContent ?? '').trim()
   }
   return null
 }
 
 /**
  * 清洗抓取到的回答文本：
- * - 去掉容器误带上的人类消息头（"你说：""XX 说："等，用户消息与回答同容器时出现）
- * - 去掉页脚水印（"ChatGPT 可能会出错""AI 生成，请注意甄别"类）
- * - 压平多余空白（textContent 抓取天然丢块级换行，压缩为紧凑文本交 markdown 层）
+ * - 剥离问题回显（回答容器把用户问题一并包住时，开头相同前缀去掉）
+ * - 去掉人类消息头（"你说：""XX 说："）与免责声明尾巴（textContent 连读场景）
+ * - 保留 innerText 的块级换行；仅压缩多余空白
  */
 const NOISE_PATTERNS = [
   /^[^：:]{1,12}说[：:]\s*/, // 「你说：」「ChatGPT 说：」开头
@@ -72,15 +75,20 @@ const NOISE_PATTERNS = [
   /(?:内容由?\s*AI\s*生成|查看对话|重新生成|复制|分享|点赞|点踩|举报)$/u, // 操作残留
 ]
 
-function cleanAnswerText(raw: string): string {
+function cleanAnswerText(raw: string, prompt?: string): string {
   let text = raw.replace(/\u00a0/g, ' ')
-  // 连续两段相同消息头（用户头 + 模型头同容器）时只保留去掉两段头部的内容
+  // 问题回显剥离：容器以「问题文本 + 换行」开头时去掉（innerText 保留换行后可精确匹配）
+  if (prompt) {
+    const p = prompt.trim()
+    if (p.length > 8 && text.startsWith(p)) {
+      text = text.slice(p.length).replace(/^[\s\n：:]+/, '')
+    }
+  }
   text = text.replace(NOISE_PATTERNS[0], '').replace(NOISE_PATTERNS[1], '')
   for (let i = 2; i < NOISE_PATTERNS.length; i++) {
     text = text.replace(NOISE_PATTERNS[i], '')
   }
-  // textContent 连读会把块级元素拼成一行；按句读还原基本可读性并压缩空白
-  text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n')
+  text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
   return text.trim()
 }
 
@@ -111,12 +119,12 @@ function readAnswerGeneric(s: ActiveSession): string {
     if (el.querySelector('[contenteditable="true"], textarea')) continue
     if (!best || text.length > best.len) best = { el, len: text.length }
   }
-  return best ? cleanAnswerText((best.el.textContent ?? '')) : ''
+  return best ? cleanAnswerText((best.el as HTMLElement).innerText ?? '', s.prompt) : ''
 }
 
 function readAnswer(s: ActiveSession): string {
   const probed = readAnswerProbed(s)
-  return probed !== null ? cleanAnswerText(probed) : readAnswerGeneric(s)
+  return probed !== null ? cleanAnswerText(probed, s.prompt) : readAnswerGeneric(s)
 }
 
 /** 生成中检测：停止按钮可见 */
@@ -151,39 +159,55 @@ function scheduleReport(s: ActiveSession): void {
 }
 
 /**
- * 监听循环。完成条件（全部满足）：
- *  1. 曾观察到生成中状态或已有非空回答
- *  2. 当前无停止按钮（不在生成）
- *  3. 回答文本连续 800ms 稳定
+ * 监听循环。完成判定（多信号，参考主流开源对话抓取实现）：
+ *  A. 确认通道：站点探针给出「生成中」标志（停止按钮）时，标志消失 + 文本稳定 800ms。
+ *  B. 兜底通道：探针完全没匹配到生成标志（DeepSeek 等），文本出现后连续
+ *     STABLE_DONE_MS 无增长 + 无停止按钮 → 视为完成。观测窗口需先过 MIN_BEFORE_DONE_MS，
+ *     避免站点渲染慢导致刚出现几个字就误判完成。
  */
+const STABLE_DONE_MS = 1500
+const MIN_BEFORE_DONE_MS = 4000
+
 function startWatch(s: ActiveSession): void {
-  const stability = new TextStability()
+  const stability = new TextStability(0)
   let sawGenerating = false
+  let sawTextAt = 0
+  const startedAt = Date.now()
 
   const check = () => {
     if (s.stopped) return
     const text = readAnswer(s)
     if (text) scheduleReport(s)
-    if (isGenerating(s)) {
+    const generating = isGenerating(s)
+    if (generating) {
       sawGenerating = true
-      stability.feed('') // 重置稳定性时钟
+      stability.feed('') // 生成中：重置稳定性时钟
       return
     }
     if (!text) return
-    if (stability.feed(text) && sawGenerating) {
-      s.stopped = true
-      const done = {
-        type: 'GENERATION_COMPLETED',
-        batchId: s.batchId,
-        requestId: s.requestId,
-        aiId: s.aiId,
-        attempt: s.attempt,
-        timestamp: Date.now(),
-        payload: { text },
-      }
-      disposeSession()
-      report(done)
+    if (!sawTextAt) sawTextAt = Date.now()
+    const stable = stability.feed(text)
+    // A 通道：见过生成标志 → 标志消失 + 文本稳定即可完成
+    if (sawGenerating && stable) finishWith(text)
+    // B 通道：从未见过生成标志（探针不匹配）→ 有文本 + 稳定足够久 + 已观测足够长
+    else if (!sawGenerating && stable && Date.now() - sawTextAt >= STABLE_DONE_MS && Date.now() - startedAt >= MIN_BEFORE_DONE_MS) {
+      finishWith(text)
     }
+  }
+
+  const finishWith = (text: string) => {
+    s.stopped = true
+    const done = {
+      type: 'GENERATION_COMPLETED',
+      batchId: s.batchId,
+      requestId: s.requestId,
+      aiId: s.aiId,
+      attempt: s.attempt,
+      timestamp: Date.now(),
+      payload: { text },
+    }
+    disposeSession()
+    report(done)
   }
 
   s.observer = new MutationObserver(() => check())
@@ -239,6 +263,7 @@ async function submitPrompt(
     requestId,
     attempt,
     probe,
+    prompt,
     observer: null as unknown as MutationObserver,
     pollTimer: null,
     reportTimer: null,

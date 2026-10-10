@@ -24,6 +24,7 @@ import {
 } from '../../shared/compare-types'
 import type { ComparePlatform } from '../../shared/compare-types'
 import { ensureAiTab, waitTabComplete, pingCompareCs } from './tab-manager'
+import { ensureContentScript } from '../cs-utils'
 
 // ---- 批次存取（chrome.storage.local） ----
 
@@ -216,8 +217,12 @@ export async function attachScreenshotTask(opts: {
   const r: Running = { batch, requestId: task.requestId, attempt: 1, tabId: opts.tabId }
   running.set(task.requestId, r)
 
-  // 同页直接提交（页面已由注入流程加载完毕）
+  // 同页直接提交。截图注入用的是一次性函数注入，不代表常驻 CS 还活着
+  // （标签页被丢弃/挂起/刚导航都会导致 "Receiving end does not exist"）——
+  // 这里先 ensureContentScript：未就绪就重新注入并等待 PING。
   try {
+    const cs = await ensureContentScript(opts.tabId)
+    if (!cs.ok) throw new Error('CS_NOT_READY')
     const resp = (await chrome.tabs.sendMessage(opts.tabId, {
       type: 'SUBMIT_PROMPT',
       batchId: batch.batchId,
@@ -485,18 +490,26 @@ export async function cancelBatch(): Promise<{ ok: boolean }> {
   return { ok: true }
 }
 
-/** SW 启动时清理：把上一世代的活跃任务标记为 failed（元数据仍在，可重试） */
+/**
+ * SW 启动时恢复：上一世代的活跃任务**不标记失败**——CS 里的 MutationObserver
+ * 独立于 SW 存活，仍在上报事件；这里把任务重置为 generating（等待下一事件续上）。
+ * 仅状态为 opening/waiting/submitting（SW 中断点）的任务标为 failed 可重试。
+ */
 export async function recoverOrphans(): Promise<void> {
   const batch = await loadCurrentBatch()
   if (!batch) return
   let dirty = false
   for (const t of batch.tasks) {
-    if (isActiveStatus(t.status)) {
-      t.status = 'failed'
-      t.error = 'SW_RESTARTED'
-      t.endedAt = Date.now()
-      dirty = true
+    if (!isActiveStatus(t.status)) continue
+    if (t.status === 'generating') {
+      // 页面侧观察器还活着：保留任务，继续接收事件（超时看门狗已随 SW 丢失，
+      // 由下一次事件 / 用户手动取消兜底）
+      continue
     }
+    t.status = 'failed'
+    t.error = 'SW_RESTARTED'
+    t.endedAt = Date.now()
+    dirty = true
   }
   if (dirty) {
     await saveBatch(batch)

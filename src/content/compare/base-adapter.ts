@@ -142,12 +142,14 @@ export class TextStability {
   private last = ''
   private lastChange = Date.now()
 
+  constructor(private stableMs = 800) {}
+
   feed(text: string): boolean {
     if (text !== this.last) {
       this.last = text
       this.lastChange = Date.now()
       return false
     }
-    return Date.now() - this.lastChange >= 800
+    return Date.now() - this.lastChange >= this.stableMs
   }
 }
