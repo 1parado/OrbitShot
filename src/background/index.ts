@@ -219,7 +219,7 @@ async function finishCompareBatch(batchKey: string): Promise<void> {
     const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
     const ctx = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
     if (!ctx || ctx.batchKey !== batchKey || ctx.aiIds.length < 2) return
-    openCompareSidePanel()
+    await openCompareSidePanel()
   } catch {
     // 忽略
   }
@@ -443,11 +443,31 @@ chrome.sidePanel
   .catch(() => {})
 recoverOrphans()
 
-function openCompareSidePanel(tab?: chrome.tabs.Tab): void {
-  const opts: chrome.sidePanel.OpenOptions = tab?.windowId
-    ? { tabId: tab.id!, windowId: tab.windowId }
-    : { windowId: chrome.windows.WINDOW_ID_CURRENT }
-  chrome.sidePanel.open(opts).catch(() => {})
+/**
+ * 打开对比面板：优先 Side Panel（同窗口），失败回退为独立标签页。
+ * sidePanel.open 要求用户手势且不接受 WINDOW_ID_CURRENT 伪 ID——批量注入
+ * 在后台跑了几十秒后调用基本无手势，因此标签页回退是常态路径，不是异常。
+ */
+async function openCompareSidePanel(): Promise<void> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (tab?.windowId) {
+      await chrome.sidePanel.open({ windowId: tab.windowId })
+      return
+    }
+  } catch {
+    /* 手势缺失 / API 失败 → 回退标签页 */
+  }
+  // 回退：独立标签页（同暂存区模式）。已有面板标签页则聚焦
+  const url = chrome.runtime.getURL('src/sidepanel/index.html')
+  const all = await chrome.tabs.query({})
+  const existing = all.find((x) => (x.url || x.pendingUrl || '').split('#')[0] === url)
+  if (existing?.id) {
+    chrome.tabs.update(existing.id, { active: true })
+    if (existing.windowId) chrome.windows.update(existing.windowId, { focused: true }).catch(() => {})
+  } else {
+    chrome.tabs.create({ url })
+  }
 }
 
 // 语言变化时同步重建右键菜单标题
