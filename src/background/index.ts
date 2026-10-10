@@ -215,13 +215,19 @@ async function noteCompareBatch(batch: { aiIds: string[]; batchKey: string }): P
 async function finishCompareBatch(batchKey: string): Promise<void> {
   try {
     const s = await loadSettings()
-    if (s.compareMode !== true) return
+    if (s.compareMode !== true) {
+      console.info('[compare] batch done but compareMode off — skip panel')
+      return
+    }
     const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
     const ctx = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
-    if (!ctx || ctx.batchKey !== batchKey || ctx.aiIds.length < 2) return
+    if (!ctx || ctx.batchKey !== batchKey || ctx.aiIds.length < 2) {
+      console.info('[compare] batch done, no pending context (single send or already consumed)')
+      return
+    }
     await openCompareSidePanel()
-  } catch {
-    // 忽略
+  } catch (e) {
+    console.error('[compare] finishCompareBatch failed:', e)
   }
 }
 
@@ -455,18 +461,22 @@ async function openCompareSidePanel(): Promise<void> {
       await chrome.sidePanel.open({ windowId: tab.windowId })
       return
     }
-  } catch {
-    /* 手势缺失 / API 失败 → 回退标签页 */
+  } catch (e) {
+    console.warn('[compare] sidePanel.open failed, falling back to tab:', e)
   }
   // 回退：独立标签页（同暂存区模式）。已有面板标签页则聚焦
-  const url = chrome.runtime.getURL('src/sidepanel/index.html')
-  const all = await chrome.tabs.query({})
-  const existing = all.find((x) => (x.url || x.pendingUrl || '').split('#')[0] === url)
-  if (existing?.id) {
-    chrome.tabs.update(existing.id, { active: true })
-    if (existing.windowId) chrome.windows.update(existing.windowId, { focused: true }).catch(() => {})
-  } else {
-    chrome.tabs.create({ url })
+  try {
+    const url = chrome.runtime.getURL('src/sidepanel/index.html')
+    const all = await chrome.tabs.query({})
+    const existing = all.find((x) => (x.url || x.pendingUrl || '').split('#')[0] === url)
+    if (existing?.id) {
+      chrome.tabs.update(existing.id, { active: true })
+      if (existing.windowId) chrome.windows.update(existing.windowId, { focused: true }).catch(() => {})
+    } else {
+      chrome.tabs.create({ url })
+    }
+  } catch (e) {
+    console.error('[compare] open panel tab failed:', e)
   }
 }
 
