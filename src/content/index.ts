@@ -217,7 +217,8 @@ async function stashShot(
 }
 
 /** 发送到单个 AI：剪贴板兜底复制 → 后台开/复用标签页并自动注入 → 按真实结果提示 */
-async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiSite): Promise<void> {  let copied = true
+async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiSite, batch?: { aiIds: string[]; batchKey: string }): Promise<void> {
+  let copied = true
   try {
     await copyCanvas(canvas)
   } catch {
@@ -231,6 +232,8 @@ async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiS
       url: site.url,
       name: site.name,
       dataUrl,
+      // 多平台批量：SW 据此记录对比上下文（compareMode 开启时）；首条携带完整平台列表
+      ...(batch ? { batchSend: batch } : {}),
     })) as { ok?: boolean; status?: string; error?: string } | null
   } catch {
     resp = null
@@ -262,12 +265,25 @@ async function sendToSites(
 ): Promise<void> {
   const { aiList } = await loadSettings()
   const sites = siteIds
-    .map((id) => aiList.find((s) => s.id === id))
+    .map((id) => aiList.find((s) => s.id === id.replace(/^ai:/, '')))
     .filter((s): s is AiSite => !!s)
   if (!sites.length) return
   toast(shadow, t(lang, 'toast.sending', { n: sites.length }))
+  // 多平台批量：首条消息携带完整平台列表（一次性写入 pending，无窗口累积竞态），
+  // 全部发送结束后通知 SW 开侧边栏；单平台保持原有行为
+  const batch =
+    sites.length >= 2
+      ? { aiIds: sites.map((s) => s.id), batchKey: crypto.randomUUID() }
+      : undefined
   for (const s of sites) {
-    await sendToAi(shadow, canvas, s)
+    await sendToAi(shadow, canvas, s, batch)
+  }
+  if (batch) {
+    try {
+      await chrome.runtime.sendMessage({ type: 'COMPARE_BATCH_DONE', batchKey: batch.batchKey })
+    } catch {
+      /* 忽略 */
+    }
   }
 }
 

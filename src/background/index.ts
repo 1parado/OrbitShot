@@ -17,7 +17,6 @@ import {
   loadCurrentBatch,
 } from './compare/dispatcher'
 import type {
-  CompareAiId,
   ComparePendingContext,
   DispatchBatchPayload,
   BatchStateSnapshot,
@@ -109,6 +108,11 @@ interface SendToAiMsg {
   dataUrl?: string
   /** 多图（暂存区批量分发：只传 id，图片由 SW 从 IndexedDB 读取，避免大体积过消息通道） */
   shotIds?: string[]
+  /**
+   * 多平台批量发送上下文（content 在确认批量时生成）：
+   * aiIds = 本批全部平台；batchKey = 批次标识。注入成功后记录对比 pending。
+   */
+  batchSend?: { aiIds: string[]; batchKey: string }
 }
 
 /** 软等待标签页加载完成（超时不阻塞——注入函数内部还会轮询编辑器就绪） */
@@ -168,9 +172,10 @@ async function handleSendToAi(msg: SendToAiMsg): Promise<{ ok: boolean; status?:
       args: [dataUrls, 30000, lang ?? 'zh-CN'],
     })
     const r = results?.[0]?.result as InjectResult | undefined
-    // 多模型对比：批量发送成功后记录上下文并打开侧边栏（用户在面板里输入共同问题）
-    if (okStatus(r?.status) && Array.isArray(msg.shotIds)) {
-      await recordComparePending(msg.url)
+    // 多模型对比：批量发送（暂存区多图 / 环形菜单 Ctrl 多选）成功后记录上下文；
+    // 侧边栏延迟到 COMPARE_BATCH_DONE 再打开。compareMode 关闭时直接跳过，行为不变
+    if (okStatus(r?.status) && msg.batchSend) {
+      await noteCompareBatch(msg.batchSend)
     }
     return { ok: true, status: r?.status ?? 'error', detail: r?.detail }
   } catch (e) {
@@ -183,32 +188,40 @@ function okStatus(s?: InjectResult['status']): boolean {
 }
 
 /**
- * 对比模式辅助：本次批量发送的平台 ≥2 时，记录 pending 上下文并打开侧边栏。
- * 单平台发送（环形菜单单选 / 失败）不触发——与原有行为完全一致。
+ * 对比模式辅助：首条成功消息一次性写入完整平台列表（content 已确认批量），
+ * 后续同 batchKey 的消息跳过；COMPARE_BATCH_DONE 时若 pending 仍存在（未消费）
+ * 且平台 ≥2，打开侧边栏。单平台批量 / compareMode 关闭 → 无 pending，行为不变。
  */
-async function recordComparePending(url: string): Promise<void> {
+async function noteCompareBatch(batch: { aiIds: string[]; batchKey: string }): Promise<void> {
   try {
     const s = await loadSettings()
     if (s.compareMode !== true) return
-    const host = new URL(url).hostname
-    let aiId: CompareAiId | null = null
-    if (host === 'chatgpt.com') aiId = 'chatgpt'
-    else if (host === 'claude.ai') aiId = 'claude'
-    else if (host === 'gemini.google.com') aiId = 'gemini'
-    if (!aiId) return
-
-    // 以当前批次窗口（最近 60s 内发送过的平台）判断是否为多平台批量
+    if (batch.aiIds.length < 2) return
     const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
-    const prev = (res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined) ?? undefined
-    const now = Date.now()
-    const ids = prev && now - prev.at < 60_000 ? [...new Set([...prev.aiIds, aiId])] : [aiId]
-    const ctx: ComparePendingContext = { aiIds: ids, at: now }
-    await chrome.storage.local.set({ [COMPARE_PENDING_KEY]: ctx })
-    if (ids.length >= 2) {
-      openCompareSidePanel()
+    const existing = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
+    if (existing?.batchKey === batch.batchKey) return // 同批次后续消息：已记录
+    const ctx: ComparePendingContext = {
+      aiIds: batch.aiIds,
+      batchKey: batch.batchKey,
+      at: Date.now(),
     }
+    await chrome.storage.local.set({ [COMPARE_PENDING_KEY]: ctx })
   } catch {
     // 对比辅助失败不影响主流程
+  }
+}
+
+/** 批量发送结束：pending 仍在（侧栏未消费）则打开侧边栏让用户输入共同问题 */
+async function finishCompareBatch(batchKey: string): Promise<void> {
+  try {
+    const s = await loadSettings()
+    if (s.compareMode !== true) return
+    const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
+    const ctx = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
+    if (!ctx || ctx.batchKey !== batchKey || ctx.aiIds.length < 2) return
+    openCompareSidePanel()
+  } catch {
+    // 忽略
   }
 }
 
@@ -262,6 +275,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {  if (msg?.
       .then(sendResponse)
       .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true // async
+  }
+
+  // 多平台批量发送结束：pending 未被消费时打开对比侧边栏
+  if (msg?.type === 'COMPARE_BATCH_DONE') {
+    finishCompareBatch(String(msg.batchKey || ''))
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: true }))
+    return true
   }
 
   // 截图暂存区：入队 + 计数（列表/删除/排序/编辑由扩展页直连同源 IndexedDB）

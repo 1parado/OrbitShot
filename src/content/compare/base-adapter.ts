@@ -16,8 +16,8 @@ export interface DomProbe {
   composer: string[]
   /** 发送按钮候选选择器（可选；多数站点可直接回车/按钮） */
   submit?: string[]
-  /** 回答容器候选：当前回答（最后一个 assistant 回复） */
-  answer: string[]
+  /** 回答容器候选（可选；缺失时 compare-entry 走通用启发式） */
+  answer?: string[]
   /** 生成中标志：停止按钮 / 生成中指示器（存在 = 生成中） */
   generating?: string[]
   /** 生成结束标志（可选，如「重新生成」按钮出现） */

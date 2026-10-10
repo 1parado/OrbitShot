@@ -6,9 +6,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import logoUrl from '../assets/logo.png'
 import { t, useLang } from '../shared/i18n'
-import type { CompareBatch, CompareAiId } from '../shared/compare-types'
-import { COMPARE_PLATFORMS, COMPARE_PENDING_KEY, isActiveStatus } from '../shared/compare-types'
+import type { CompareBatch, CompareAiId, ComparePlatform } from '../shared/compare-types'
+import { COMPARE_PENDING_KEY, isActiveStatus, platformsFromAiList } from '../shared/compare-types'
 import type { ComparePendingContext } from '../shared/compare-types'
+import { loadSettings, iconForSite, faviconCandidates } from '../shared/settings'
+import type { AiSite } from '../shared/settings'
 import { dispatchBatch, cancelBatch, connectPort } from './services/api'
 import ModelResponseCard from './components/ModelResponseCard'
 import SummaryPanel from './components/SummaryPanel'
@@ -25,7 +27,8 @@ export default function CompareApp() {
   const [lang] = useLang()
   const [batch, setBatch] = useState<CompareBatch | undefined>()
   const [prompt, setPrompt] = useState('')
-  const [picked, setPicked] = useState<Set<CompareAiId>>(new Set(['chatgpt', 'claude', 'gemini']))
+  const [platforms, setPlatforms] = useState<ComparePlatform[]>([])
+  const [picked, setPicked] = useState<Set<CompareAiId>>(new Set())
   const [composerOpen, setComposerOpen] = useState(true)
   const [showSummary, setShowSummary] = useState(false)
   const [note, setNote] = useState<string | null>(null)
@@ -33,6 +36,26 @@ export default function CompareApp() {
 
   // Port 订阅：SW 快照驱动
   useEffect(() => connectPort(setBatch), [])
+
+  // 平台表：来自用户 AI 设置（启用项），设置变化时跟随刷新
+  useEffect(() => {
+    const refresh = () =>
+      loadSettings()
+        .then((s) => {
+          const list = platformsFromAiList(s.aiList)
+          setPlatforms(list)
+          setPicked((prev) => {
+            // 过滤掉已不存在/停用的预选；初始为空时全选
+            const valid = [...prev].filter((id) => list.some((p) => p.id === id))
+            return valid.length ? new Set(valid) : new Set(list.map((p) => p.id))
+          })
+        })
+        .catch(() => {})
+    refresh()
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes['orbitshot.settings']) refresh()
+    })
+  }, [])
 
   // 批量发送截图后打开面板：读取 pending 上下文 → 预选本次发送的平台 + 提示输入问题
   useEffect(() => {
@@ -49,6 +72,11 @@ export default function CompareApp() {
       .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const platformOf = useCallback(
+    (id: string) => platforms.find((p) => p.id === id),
+    [platforms]
+  )
 
   const anyActive = useMemo(
     () => !!batch?.tasks.some((tk) => isActiveStatus(tk.status)),
@@ -96,7 +124,7 @@ export default function CompareApp() {
     const parts = batch.tasks
       .filter((tk) => tk.response)
       .map((tk) => {
-        const name = COMPARE_PLATFORMS.find((p) => p.id === tk.aiId)?.name ?? tk.aiId
+        const name = platformOf(tk.aiId)?.name ?? tk.aiId
         return `## ${name}\n\n${tk.response}`
       })
     if (!parts.length) return
@@ -162,9 +190,10 @@ export default function CompareApp() {
           className="flex w-full items-center gap-2 px-3 py-2 text-left"
         >
           <span className="text-[12px] font-semibold text-slate-700">{t(lang, 'cmp.compose')}</span>
-          <span className="ml-auto flex items-center gap-1.5">
+          <span className="ml-auto flex max-w-[60%] flex-wrap items-center justify-end gap-1">
             {[...picked].map((id) => {
-              const p = COMPARE_PLATFORMS.find((x) => x.id === id)!
+              const p = platformOf(id)
+              if (!p) return null
               return (
                 <span key={id} className="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-600 ring-1 ring-sky-100">
                   {p.name}
@@ -192,20 +221,22 @@ export default function CompareApp() {
               placeholder={t(lang, 'cmp.ph')}
               className="sp-scroll w-full resize-none rounded-xl border border-slate-200 bg-white/90 px-3 py-2 text-[13px] leading-6 text-slate-800 outline-none transition placeholder:text-slate-300 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
             />
-            <div className="mt-2 flex items-center gap-1.5">
-              {COMPARE_PLATFORMS.map((p) => {
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {platforms.map((p) => {
                 const on = picked.has(p.id)
                 return (
                   <button
                     key={p.id}
                     onClick={() => toggle(p.id)}
-                    className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition ring-1 ${
+                    title={p.name}
+                    className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold transition ring-1 ${
                       on
                         ? 'bg-sky-500 text-white ring-sky-500 shadow-sm shadow-sky-200'
                         : 'bg-white/80 text-slate-500 ring-slate-200 hover:ring-slate-300'
                     }`}
                   >
-                    {p.name}
+                    <PlatformChipIcon id={p.id} name={p.name} url={p.url} />
+                    <span className="max-w-[72px] truncate">{p.name}</span>
                   </button>
                 )
               })}
@@ -245,9 +276,9 @@ export default function CompareApp() {
             }}
           >
             {batch.tasks.map((tk) => {
-              const p = COMPARE_PLATFORMS.find((x) => x.id === tk.aiId)!
+              const p = platformOf(tk.aiId)
               return (
-                <ModelResponseCard key={tk.requestId} task={tk} name={p.name} lang={lang} onCopied={() => flash(t(lang, 'toast.copied'))} />
+                <ModelResponseCard key={tk.requestId} task={tk} name={p?.name ?? tk.aiId} url={p?.url} lang={lang} onCopied={() => flash(t(lang, 'toast.copied'))} />
               )
             })}
           </div>
@@ -259,13 +290,38 @@ export default function CompareApp() {
           lang={lang}
           question={batch.prompt}
           answers={completed.map((tk) => ({
-            name: COMPARE_PLATFORMS.find((x) => x.id === tk.aiId)?.name ?? tk.aiId,
+            name: platformOf(tk.aiId)?.name ?? tk.aiId,
             text: tk.response,
           }))}
           onClose={() => setShowSummary(false)}
         />
       )}
     </div>
+  )
+}
+
+/** 平台小图标：内置 logo → favicon 链 → 首字母（自定义 AI 无内置图标时回退） */
+function PlatformChipIcon(props: { id: string; name: string; url?: string }) {
+  const [idx, setIdx] = useState(0)
+  const builtin = iconForSite(props.id)
+  const candidates = builtin ? [] : faviconCandidates(props.url ?? '')
+  const src = builtin ?? candidates[idx]
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        className="h-3.5 w-3.5 rounded object-contain"
+        draggable={false}
+        referrerPolicy="no-referrer"
+        onError={() => setIdx((i) => i + 1)}
+      />
+    )
+  }
+  return (
+    <span className="flex h-3.5 w-3.5 items-center justify-center rounded bg-white/70 text-[8px] font-bold text-slate-500">
+      {props.name.charAt(0).toUpperCase()}
+    </span>
   )
 }
 

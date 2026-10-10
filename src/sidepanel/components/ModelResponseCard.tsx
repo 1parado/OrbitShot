@@ -2,9 +2,9 @@
  * 单平台回答卡片：Logo / 名称 / 状态 / 耗时 / 流式 Markdown / 操作栏。
  * Markdown 渲染走白名单净化（services/markdown），内容不作为原始 HTML 插入。
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { renderMarkdown } from '../services/markdown'
-import { iconForSite } from '../../shared/settings'
+import { iconForSite, faviconCandidates } from '../../shared/settings'
 import { t } from '../../shared/dicts'
 import type { Lang } from '../../shared/settings'
 import type { CompareTask, CompareTaskStatus } from '../../shared/compare-types'
@@ -37,15 +37,27 @@ function fmtDur(ms?: number): string {
   return ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
 }
 
-/** 平台图标：内置 logo → 首字母（三个平台均有内置 logo） */
-function PlatformIcon({ aiId, name }: { aiId: string; name: string }) {
-  const builtin = iconForSite(aiId)
-  if (builtin) {
-    return <img src={builtin} alt="" className="h-4 w-4 shrink-0 rounded object-contain" draggable={false} />
+/** 平台图标：内置 logo → favicon 链 → 首字母（自定义 AI 回退） */
+function PlatformIcon(props: { aiId: string; name: string; url?: string }) {
+  const [idx, setIdx] = useState(0)
+  const builtin = iconForSite(props.aiId)
+  const candidates = builtin ? [] : faviconCandidates(props.url ?? '')
+  const src = builtin ?? candidates[idx]
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        className="h-4 w-4 shrink-0 rounded object-contain"
+        draggable={false}
+        referrerPolicy="no-referrer"
+        onError={() => setIdx((i) => i + 1)}
+      />
+    )
   }
   return (
     <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-slate-100 text-[9px] font-bold text-slate-500">
-      {name.charAt(0)}
+      {props.name.charAt(0).toUpperCase()}
     </span>
   )
 }
@@ -75,7 +87,13 @@ function IconBtn(props: { title: string; d: string; onClick: () => void; danger?
   )
 }
 
-export default function ModelResponseCard(props: { task: CompareTask; name: string; lang: Lang; onCopied: () => void }) {
+export default function ModelResponseCard(props: {
+  task: CompareTask
+  name: string
+  url?: string
+  lang: Lang
+  onCopied: () => void
+}) {
   const { task, name, lang } = props
   const meta = statusMeta(task.status, lang)
   const active = task.status === 'generating' || task.status === 'submitting'
@@ -92,9 +110,9 @@ export default function ModelResponseCard(props: { task: CompareTask; name: stri
     <div className="glass sp-card flex min-h-0 flex-col overflow-hidden rounded-2xl">
       {/* 头部 */}
       <div className="flex items-center gap-2 border-b border-slate-100/80 px-3 py-2">
-        <PlatformIcon aiId={task.aiId} name={name} />
-        <span className="text-[13px] font-semibold text-slate-800">{name}</span>
-        <span className={`flex items-center gap-1.5 text-[11px] ${meta.cls}`}>
+        <PlatformIcon aiId={task.aiId} name={name} url={props.url} />
+        <span className="truncate text-[13px] font-semibold text-slate-800" title={name}>{name}</span>
+        <span className={`flex shrink-0 items-center gap-1.5 text-[11px] ${meta.cls}`}>
           <span className={`h-1.5 w-1.5 rounded-full ${meta.dot} ${active ? 'sp-dot-active' : ''}`} />
           {meta.label}
           {task.durationMs ? <span className="text-slate-300">· {fmtDur(task.durationMs)}</span> : null}
@@ -106,18 +124,9 @@ export default function ModelResponseCard(props: { task: CompareTask; name: stri
             <>
               {task.response && <IconBtn title={t(lang, 'cmp.copy')} d={SVG.copy} onClick={copy} />}
               <IconBtn title={t(lang, 'cmp.retry')} d={SVG.retry} onClick={() => retryRequest(task.requestId)} />
-              <IconBtn
-                title={t(lang, 'cmp.open')}
-                d={SVG.ext}
-                onClick={() => {
-                  const urls: Record<string, string> = {
-                    chatgpt: 'https://chatgpt.com/',
-                    claude: 'https://claude.ai/',
-                    gemini: 'https://gemini.google.com/app',
-                  }
-                  chrome.tabs.create({ url: urls[task.aiId] ?? 'about:blank' })
-                }}
-              />
+              {props.url && (
+                <IconBtn title={t(lang, 'cmp.open')} d={SVG.ext} onClick={() => chrome.tabs.create({ url: props.url! })} />
+              )}
             </>
           )}
         </span>
@@ -157,6 +166,7 @@ function errText(code: string, lang: Lang): string {
     SW_RESTARTED: t(lang, 'cmp.err.swrestart'),
     PAGE_UNLOAD: t(lang, 'cmp.err.pageunload'),
     GENERATION_FAILED: t(lang, 'cmp.err.genfail'),
+    PLATFORM_REMOVED: t(lang, 'cmp.err.nopick'),
   }
   return map[code] ?? code
 }

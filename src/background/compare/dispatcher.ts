@@ -18,10 +18,11 @@ import {
   COMPARE_CURRENT_KEY,
   COMPARE_HISTORY_KEY,
   COMPARE_PORT,
-  COMPARE_PLATFORMS,
   DEFAULT_TASK_TIMEOUT_MS,
   isActiveStatus,
+  platformsFromAiList,
 } from '../../shared/compare-types'
+import type { ComparePlatform } from '../../shared/compare-types'
 import { ensureAiTab, waitTabComplete, pingCompareCs } from './tab-manager'
 
 // ---- 批次存取（chrome.storage.local） ----
@@ -117,6 +118,17 @@ function clearTimeoutOf(r: Running | undefined) {
 
 // ---- 主入口：DISPATCH_BATCH ----
 
+/** 平台表：从用户 AI 设置构建（启用项），带短缓存 */
+let platformCache: { at: number; list: ComparePlatform[] } | null = null
+async function getPlatforms(): Promise<ComparePlatform[]> {
+  if (platformCache && Date.now() - platformCache.at < 5000) return platformCache.list
+  const { loadSettings } = await import('../../shared/settings')
+  const s = await loadSettings()
+  const list = platformsFromAiList(s.aiList)
+  platformCache = { at: Date.now(), list }
+  return list
+}
+
 export async function dispatchBatch(payload: {
   prompt: string
   aiIds: CompareAiId[]
@@ -124,8 +136,9 @@ export async function dispatchBatch(payload: {
 }): Promise<{ ok: boolean; batchId?: string; error?: string }> {
   const prompt = payload.prompt?.trim()
   if (!prompt) return { ok: false, error: 'PROMPT_EMPTY' }
-  const aiIds = (payload.aiIds ?? []).filter((id, i, a) =>
-    COMPARE_PLATFORMS.some((p) => p.id === id) && a.indexOf(id) === i
+  const platforms = await getPlatforms()
+  const aiIds = (payload.aiIds ?? []).filter(
+    (id, i, a) => platforms.some((p) => p.id === id) && a.indexOf(id) === i
   )
   if (!aiIds.length) return { ok: false, error: 'NO_PLATFORM' }
 
@@ -166,7 +179,9 @@ async function runTask(batch: CompareBatch, task: CompareTask, timeoutMs: number
   try {
     // 1) opening_tab
     await patchTask(batch, requestId, { status: 'opening_tab' })
-    const platform = COMPARE_PLATFORMS.find((p) => p.id === task.aiId)!
+    const platforms = await getPlatforms()
+    const platform = platforms.find((p) => p.id === task.aiId)
+    if (!platform) throw new Error('PLATFORM_REMOVED')
     const tab = await ensureAiTab(platform)
     // 标签页在开页阶段被用户关闭
     if (r.cancelled) return
@@ -193,7 +208,7 @@ async function runTask(batch: CompareBatch, task: CompareTask, timeoutMs: number
       aiId: task.aiId,
       attempt: task.attempt,
       timestamp: Date.now(),
-      payload: { prompt: batch.prompt, requestId, attempt: task.attempt },
+      payload: { prompt: batch.prompt, requestId, attempt: task.attempt, aiId: task.aiId },
     })) as { ok: boolean; error?: string } | undefined
     if (r.cancelled) return
     if (!resp?.ok) throw new Error(resp?.error || 'SUBMIT_FAILED')

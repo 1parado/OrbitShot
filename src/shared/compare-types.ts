@@ -12,20 +12,24 @@
 
 // ---- 平台定义 ----
 
-export type CompareAiId = 'chatgpt' | 'claude' | 'gemini'
+/** 对比支持的平台 id = 内置 AI 列表的 id（与 settings.DEFAULT_AI_LIST 对齐，含自定义项） */
+export type CompareAiId = string
 
 export interface ComparePlatform {
-  id: CompareAiId
+  id: string
   name: string
   url: string
 }
 
-/** 首期支持的三个平台（与现有 DEFAULT_AI_LIST 中的 id 对齐） */
-export const COMPARE_PLATFORMS: ComparePlatform[] = [
-  { id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/' },
-  { id: 'claude', name: 'Claude', url: 'https://claude.ai/' },
-  { id: 'gemini', name: 'Gemini', url: 'https://gemini.google.com/app' },
-]
+/**
+ * 从用户 AI 列表构建对比平台表：仅保留启用的项。
+ * Side Panel 平台选择器与 dispatcher 都以此为准——对比覆盖全部内置 AI 与自定义 AI。
+ */
+export function platformsFromAiList(aiList: { id: string; name: string; url: string; enabled: boolean }[]): ComparePlatform[] {
+  return aiList
+    .filter((s) => s.enabled)
+    .map((s) => ({ id: s.id, name: s.name, url: s.url }))
+}
 
 // ---- 任务状态机 ----
 
@@ -154,7 +158,10 @@ export const COMPARE_HISTORY_KEY = COMPARE_STORAGE_PREFIX + 'history'
 export const COMPARE_PENDING_KEY = COMPARE_STORAGE_PREFIX + 'pending'
 
 export interface ComparePendingContext {
-  aiIds: CompareAiId[]
+  /** 本批次的全部平台（content 确认批量时一次性给定，无窗口累积） */
+  aiIds: string[]
+  /** 批次标识：同批次后续消息据此识别，侧栏只消费一次 */
+  batchKey: string
   at: number
 }
 
