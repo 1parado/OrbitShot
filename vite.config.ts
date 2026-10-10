@@ -8,9 +8,13 @@ export default defineConfig({
   build: {
     sourcemap: false,
     rollupOptions: {
-      // 截图暂存工作区：独立扩展页面（crxjs 不处理 web_accessible_resources 的 html 入口，
-      // 用 Vite 原生多页构建补上；产物落在 dist/src/staging/index.html）
-      input: { staging: 'src/staging/index.html' },
+      // 独立扩展页面（crxjs 不处理 web_accessible_resources 的 html 入口，
+      // 用 Vite 原生多页构建补上；side_panel.default_path 的入口由 crxjs 处理，
+      // 这里补充多页构建入口）
+      input: {
+        staging: 'src/staging/index.html',
+        sidepanel: 'src/sidepanel/index.html',
+      },
     },
   },
 })

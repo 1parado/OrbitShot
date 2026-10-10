@@ -6,7 +6,7 @@ export default defineManifest({
   short_name: 'OrbitShot',
   version: '0.3.0',
   description: '截图 → 标注 → 环形菜单 → 一键发送到网页版 AI。Visual Context Router.',
-  permissions: ['storage', 'tabs', 'clipboardWrite', 'scripting', 'contextMenus'],
+  permissions: ['storage', 'tabs', 'clipboardWrite', 'scripting', 'contextMenus', 'sidePanel'],
   host_permissions: ['<all_urls>'],
   // 截图暂存工作区（独立扩展页面；crxjs 会把列出的 html 作为入口构建）
   web_accessible_resources: [
@@ -24,6 +24,10 @@ export default defineManifest({
     default_title: 'OrbitShot 截图',
   },
   options_page: 'src/options/index.html',
+  // 多模型对比工作台（Chrome 114+ Side Panel）
+  side_panel: {
+    default_path: 'src/sidepanel/index.html',
+  },
   content_scripts: [
     {
       matches: ['<all_urls>'],

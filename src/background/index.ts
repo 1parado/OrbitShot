@@ -6,6 +6,17 @@ import type { Lang } from '../shared/settings'
 import { injectAiImages } from './ai-injector'
 import type { InjectResult } from './ai-injector'
 import { addShot, getShot, countShots, blobToDataUrl, MAX_SHOTS } from './shots'
+import {
+  dispatchBatch,
+  retryRequest,
+  cancelRequest,
+  cancelBatch,
+  handleUpstream,
+  attachComparePort,
+  recoverOrphans,
+  loadCurrentBatch,
+} from './compare/dispatcher'
+import type { DispatchBatchPayload, BatchStateSnapshot } from '../shared/compare-types'
 
 export interface CaptureResp {
   ok: boolean
@@ -229,9 +240,55 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {  if (msg?.
     return
   }
 
+  if (msg?.type === 'OPEN_COMPARE') {
+    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => openCompareSidePanel(tab))
+    sendResponse({ ok: true })
+    return
+  }
+
   if (msg?.type === 'RUN_FLOW' || msg?.type === 'RUN_FULLPAGE') {
     handleRun(msg.type).then(sendResponse)
     return true // async
+  }
+
+  // ---- 多模型对比（Compare）----
+
+  // CS 上行事件：PROMPT_ACCEPTED / GENERATION_* / RESPONSE_* / CONTENT_UNAVAILABLE
+  const COMPARE_UPSTREAM = new Set(['PROMPT_ACCEPTED', 'RESPONSE_DELTA', 'RESPONSE_SNAPSHOT', 'CONTENT_UNAVAILABLE'])
+  if ((typeof msg?.type === 'string' && (msg.type.startsWith('GENERATION_') || COMPARE_UPSTREAM.has(msg.type)))) {
+    handleUpstream(msg).catch(() => {})
+    return // 上行事件不需要响应体
+  }
+
+  if (msg?.type === 'DISPATCH_BATCH') {
+    dispatchBatch(msg.payload as DispatchBatchPayload)
+      .then(sendResponse)
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg?.type === 'RETRY_REQUEST') {
+    retryRequest(msg.requestId)
+      .then(sendResponse)
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg?.type === 'CANCEL_REQUEST') {
+    cancelRequest(msg.requestId)
+      .then(sendResponse)
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg?.type === 'CANCEL_BATCH') {
+    cancelBatch()
+      .then(sendResponse)
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg?.type === 'GET_BATCH_STATE') {
+    loadCurrentBatch()
+      .then((batch) => sendResponse({ ok: true, batch } satisfies BatchStateSnapshot))
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
   }
 })
 
@@ -318,6 +375,21 @@ async function rebuildContextMenus(): Promise<void> {
 chrome.runtime.onInstalled.addListener(() => {
   rebuildContextMenus()
 })
+
+// ---- Side Panel（多模型对比工作台）----
+// 用户点击工具栏图标时打开侧边栏；SW 重启时恢复上一世代未完成任务状态
+chrome.runtime.onConnect.addListener(attachComparePort)
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: false })
+  .catch(() => {})
+recoverOrphans()
+
+function openCompareSidePanel(tab?: chrome.tabs.Tab): void {
+  const opts: chrome.sidePanel.OpenOptions = tab?.windowId
+    ? { tabId: tab.id!, windowId: tab.windowId }
+    : { windowId: chrome.windows.WINDOW_ID_CURRENT }
+  chrome.sidePanel.open(opts).catch(() => {})
+}
 
 // 语言变化时同步重建右键菜单标题
 chrome.storage.onChanged.addListener((changes, area) => {

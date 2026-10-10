@@ -10,6 +10,10 @@ import { captureFullPage } from './fullpage'
 import { loadSettings, iconForSite, faviconCandidates, comboFromEvent } from '../shared/settings'
 import type { AiSite, Lang } from '../shared/settings'
 import { t } from '../shared/i18n'
+import { initCompareContent } from './compare/compare-entry'
+
+// 多模型对比模块：仅在 ChatGPT / Claude / Gemini 页面注册监听（内部自行判断 host）
+initCompareContent()
 
 let host: HTMLDivElement | null = null
 let shadow: ShadowRoot | null = null
