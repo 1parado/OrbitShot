@@ -16,7 +16,13 @@ import {
   recoverOrphans,
   loadCurrentBatch,
 } from './compare/dispatcher'
-import type { DispatchBatchPayload, BatchStateSnapshot } from '../shared/compare-types'
+import type {
+  CompareAiId,
+  ComparePendingContext,
+  DispatchBatchPayload,
+  BatchStateSnapshot,
+} from '../shared/compare-types'
+import { COMPARE_PENDING_KEY } from '../shared/compare-types'
 
 export interface CaptureResp {
   ok: boolean
@@ -162,9 +168,47 @@ async function handleSendToAi(msg: SendToAiMsg): Promise<{ ok: boolean; status?:
       args: [dataUrls, 30000, lang ?? 'zh-CN'],
     })
     const r = results?.[0]?.result as InjectResult | undefined
+    // 多模型对比：批量发送成功后记录上下文并打开侧边栏（用户在面板里输入共同问题）
+    if (okStatus(r?.status) && Array.isArray(msg.shotIds)) {
+      await recordComparePending(msg.url)
+    }
     return { ok: true, status: r?.status ?? 'error', detail: r?.detail }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+function okStatus(s?: InjectResult['status']): boolean {
+  return s === 'inserted' || s === 'pasted-unverified'
+}
+
+/**
+ * 对比模式辅助：本次批量发送的平台 ≥2 时，记录 pending 上下文并打开侧边栏。
+ * 单平台发送（环形菜单单选 / 失败）不触发——与原有行为完全一致。
+ */
+async function recordComparePending(url: string): Promise<void> {
+  try {
+    const s = await loadSettings()
+    if (s.compareMode !== true) return
+    const host = new URL(url).hostname
+    let aiId: CompareAiId | null = null
+    if (host === 'chatgpt.com') aiId = 'chatgpt'
+    else if (host === 'claude.ai') aiId = 'claude'
+    else if (host === 'gemini.google.com') aiId = 'gemini'
+    if (!aiId) return
+
+    // 以当前批次窗口（最近 60s 内发送过的平台）判断是否为多平台批量
+    const res = await chrome.storage.local.get(COMPARE_PENDING_KEY)
+    const prev = (res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined) ?? undefined
+    const now = Date.now()
+    const ids = prev && now - prev.at < 60_000 ? [...new Set([...prev.aiIds, aiId])] : [aiId]
+    const ctx: ComparePendingContext = { aiIds: ids, at: now }
+    await chrome.storage.local.set({ [COMPARE_PENDING_KEY]: ctx })
+    if (ids.length >= 2) {
+      openCompareSidePanel()
+    }
+  } catch {
+    // 对比辅助失败不影响主流程
   }
 }
 
@@ -236,12 +280,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {  if (msg?.
 
   if (msg?.type === 'OPEN_OPTIONS') {
     chrome.runtime.openOptionsPage()
-    sendResponse({ ok: true })
-    return
-  }
-
-  if (msg?.type === 'OPEN_COMPARE') {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => openCompareSidePanel(tab))
     sendResponse({ ok: true })
     return
   }

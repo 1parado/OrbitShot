@@ -150,6 +150,13 @@ export const COMPARE_PORT = 'orbitshot-compare'
 export const COMPARE_STORAGE_PREFIX = 'orbitshot.compare.'
 export const COMPARE_CURRENT_KEY = COMPARE_STORAGE_PREFIX + 'current'
 export const COMPARE_HISTORY_KEY = COMPARE_STORAGE_PREFIX + 'history'
+/** 批量发送截图后待对比上下文（SW 写入，侧边栏读后即删） */
+export const COMPARE_PENDING_KEY = COMPARE_STORAGE_PREFIX + 'pending'
+
+export interface ComparePendingContext {
+  aiIds: CompareAiId[]
+  at: number
+}
 
 /** 单次任务默认超时 */
 export const DEFAULT_TASK_TIMEOUT_MS = 120_000

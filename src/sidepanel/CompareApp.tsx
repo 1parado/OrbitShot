@@ -7,8 +7,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import logoUrl from '../assets/logo.png'
 import { t, useLang } from '../shared/i18n'
 import type { CompareBatch, CompareAiId } from '../shared/compare-types'
-import { COMPARE_PLATFORMS } from '../shared/compare-types'
-import { isActiveStatus } from '../shared/compare-types'
+import { COMPARE_PLATFORMS, COMPARE_PENDING_KEY, isActiveStatus } from '../shared/compare-types'
+import type { ComparePendingContext } from '../shared/compare-types'
 import { dispatchBatch, cancelBatch, connectPort } from './services/api'
 import ModelResponseCard from './components/ModelResponseCard'
 import SummaryPanel from './components/SummaryPanel'
@@ -33,6 +33,22 @@ export default function CompareApp() {
 
   // Port 订阅：SW 快照驱动
   useEffect(() => connectPort(setBatch), [])
+
+  // 批量发送截图后打开面板：读取 pending 上下文 → 预选本次发送的平台 + 提示输入问题
+  useEffect(() => {
+    chrome.storage.local
+      .get(COMPARE_PENDING_KEY)
+      .then(async (res) => {
+        const ctx = res?.[COMPARE_PENDING_KEY] as ComparePendingContext | undefined
+        if (!ctx?.aiIds?.length) return
+        await chrome.storage.local.remove(COMPARE_PENDING_KEY) // 读后即删
+        setPicked(new Set(ctx.aiIds))
+        setComposerOpen(true)
+        flash(t('zh-CN', 'cmp.pending.hint'))
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const anyActive = useMemo(
     () => !!batch?.tasks.some((tk) => isActiveStatus(tk.status)),
