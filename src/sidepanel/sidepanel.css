@@ -132,6 +132,32 @@ body {
   margin: 0.8em 0;
 }
 
+/* ---- 思考过程折叠区（纯文本） ---- */
+.sp-think {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+
+/* ---- KaTeX 公式 ---- */
+.sp-md .katex {
+  font-size: 1.06em;
+}
+.sp-md .katex-display {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+.sp-md .katex-display > .katex {
+  white-space: normal;
+}
+/* 非法公式的降级展示 */
+.sp-md .sp-math-err {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.06);
+}
+
 /* ---- 图片（AI 回复内嵌图） ---- */
 .sp-md img.sp-md-img {
   display: block;

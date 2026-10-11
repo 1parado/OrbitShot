@@ -13,6 +13,15 @@ export async function dispatchBatch(payload: {
   return chrome.runtime.sendMessage({ type: 'DISPATCH_BATCH', payload })
 }
 
+/** 多轮追问：同一批平台在既有会话上继续提问（可带附件） */
+export function followUpBatch(payload: {
+  batchId: string
+  prompt: string
+  attachments?: { name: string; mime: string; dataUrl: string }[]
+}): Promise<{ ok: boolean; error?: string }> {
+  return chrome.runtime.sendMessage({ type: 'FOLLOWUP_BATCH', payload })
+}
+
 export function retryRequest(requestId: string): Promise<{ ok: boolean; error?: string }> {
   return chrome.runtime.sendMessage({ type: 'RETRY_REQUEST', requestId })
 }

@@ -399,6 +399,62 @@
   gap: 8px;
   margin-top: 12px;
 }
+.os-cmp-attach-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.os-cmp-attach-btn {
+  border: 1px dashed rgba(15, 23, 42, 0.22);
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  padding: 5px 10px;
+  font: 500 11.5px/1.2 system-ui, sans-serif;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.os-cmp-attach-btn:hover {
+  border-color: #38bdf8;
+  color: #0284c7;
+  background: rgba(56, 189, 248, 0.06);
+}
+.os-cmp-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.os-cmp-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 170px;
+  background: rgba(15, 23, 42, 0.05);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 7px;
+  padding: 3px 7px;
+  font-size: 10.5px;
+  color: #475569;
+}
+.os-cmp-file-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.os-cmp-file-chip button {
+  border: none;
+  background: none;
+  color: #94a3b8;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0 1px;
+}
+.os-cmp-file-chip button:hover {
+  color: #ef4444;
+}
 .os-cmp-btn {
   border: none;
   border-radius: 10px;

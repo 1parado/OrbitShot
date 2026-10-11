@@ -219,7 +219,7 @@ function AiRow(props: {
 
 /* ---------- 通用设置行：左标题+描述，右控件 ---------- */
 function SettingRow(props: {
-  title: string
+  title: React.ReactNode
   desc?: string
   children: React.ReactNode
 }) {
@@ -772,7 +772,17 @@ export default function Options() {
                   ))}
                 </select>
               </SettingRow>
-              <SettingRow title={t(lang, 'pref.compare')} desc={t(lang, 'pref.compare.desc')}>
+              <SettingRow
+                title={
+                  <span className="flex items-center gap-2">
+                    {t(lang, 'pref.compare')}
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                      {t(lang, 'pref.experimental')}
+                    </span>
+                  </span>
+                }
+                desc={t(lang, 'pref.compare.desc')}
+              >
                 <button
                   role="switch"
                   aria-checked={compareMode}

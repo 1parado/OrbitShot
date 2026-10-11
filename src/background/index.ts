@@ -3,12 +3,13 @@
 import { loadSettings } from '../shared/settings'
 import { t } from '../shared/dicts'
 import type { Lang } from '../shared/settings'
-import { injectAiImages } from './ai-injector'
+import { injectFiles } from './ai-injector'
 import type { InjectResult } from './ai-injector'
 import { addShot, getShot, countShots, blobToDataUrl, MAX_SHOTS } from './shots'
 import { pingTab, ensureContentScript } from './cs-utils'
 import {
   dispatchBatch,
+  followUpBatch,
   retryRequest,
   cancelRequest,
   cancelBatch,
@@ -22,6 +23,7 @@ import {
 } from './compare/dispatcher'
 import type {
   DispatchBatchPayload,
+  FollowupPayload,
   BatchStateSnapshot,
 } from '../shared/compare-types'
 
@@ -81,9 +83,15 @@ interface SendToAiMsg {
   /**
    * 多平台批量发送上下文（content 确认批量时生成）：
    * aiIds = 本批全部平台；batchKey = 批次标识；prompt = 用户当场输入的问题
-   * （空串 = 用户未输入，走纯批量注入，不进对比）。
+   * （空串 = 用户未输入，走纯批量注入，不进对比）；attachments = 随问题
+   * 一起发送的附件（图片/PDF/文档，dataUrl 传输）。
    */
-  batchSend?: { aiIds: string[]; batchKey: string; prompt: string }
+  batchSend?: {
+    aiIds: string[]
+    batchKey: string
+    prompt: string
+    attachments?: { name: string; mime: string; dataUrl: string }[]
+  }
 }
 
 /** 软等待标签页加载完成（超时不阻塞——注入函数内部还会轮询编辑器就绪） */
@@ -107,18 +115,25 @@ async function waitTabComplete(tabId: number, timeoutMs: number): Promise<void> 
 
 async function handleSendToAi(msg: SendToAiMsg): Promise<{ ok: boolean; status?: InjectResult['status']; detail?: string; error?: string }> {
   try {
-    // 0) 汇总待注入图片：单图直取；批量按暂存记录顺序从 IndexedDB 读取
-    const dataUrls: string[] = []
+    // 0) 汇总待注入附件：截图（单图直取 / 暂存区按 shotIds 读取）+ 用户附加的文件。
+    //    截图与文件统一走 injectFiles（任意 MIME paste）。
+    const files: { name: string; mime: string; dataUrl: string }[] = []
     if (msg.dataUrl) {
-      dataUrls.push(msg.dataUrl)
+      files.push({ name: 'orbitshot-1.png', mime: 'image/png', dataUrl: msg.dataUrl })
     }
     if (Array.isArray(msg.shotIds)) {
+      let idx = 1
       for (const id of msg.shotIds) {
         const rec = await getShot(id)
-        if (rec?.blob) dataUrls.push(await blobToDataUrl(rec.blob))
+        if (rec?.blob) {
+          files.push({ name: `orbitshot-${++idx}.png`, mime: 'image/png', dataUrl: await blobToDataUrl(rec.blob) })
+        }
       }
     }
-    if (!dataUrls.length) return { ok: false, error: '没有可发送的截图' }
+    if (Array.isArray(msg.batchSend?.attachments)) {
+      files.push(...msg.batchSend.attachments)
+    }
+    if (!files.length) return { ok: false, error: '没有可发送的截图' }
 
     // 1) 复用同源标签页（激活并聚焦），否则新建
     const origin = new URL(msg.url).origin
@@ -134,13 +149,13 @@ async function handleSendToAi(msg: SendToAiMsg): Promise<{ ok: boolean; status?:
       tabId = tab.id!
     }
 
-    // 2) 等页面加载完，再注入适配器（等编辑器 → 逐张合成 paste → 验证预览数量）
+    // 2) 等页面加载完，再注入附件（等编辑器 → 逐个合成 paste → 验证）
     await waitTabComplete(tabId, 20000)
     const { lang } = await loadSettings() // 页内提示 pill 跟随扩展语言设置
     const results = await chrome.scripting.executeScript({
       target: { tabId },
-      func: injectAiImages,
-      args: [dataUrls, 30000, lang ?? 'zh-CN'],
+      func: injectFiles,
+      args: [files, 30000, lang ?? 'zh-CN'],
     })
     const r = results?.[0]?.result as InjectResult | undefined
     // 多模型对比：批量（≥2 平台）且开关开启且有问题时，注入截图成功 → 同标签页提交问题并观察
@@ -306,6 +321,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {  if (msg?.
 
   if (msg?.type === 'DISPATCH_BATCH') {
     dispatchBatch(msg.payload as DispatchBatchPayload)
+      .then(sendResponse)
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg?.type === 'FOLLOWUP_BATCH') {
+    followUpBatch(msg.payload as FollowupPayload)
       .then(sendResponse)
       .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true

@@ -71,6 +71,13 @@ export interface CompareTask {
   status: CompareTaskStatus
   /** 流式回复快照（completed / generating 时有值） */
   response: string
+  /**
+   * 思考/推理过程（独立于正文；DOM 抓取路径由平台 thinking 探针分离，
+   * 与 grok2api ChatStreamSnapshot.reasoning 同构）。空串 = 无思考内容。
+   */
+  thinking: string
+  /** 回答中的图片 URL 列表（DOM 抓取路径提取；不含 data: 内嵌） */
+  images: string[]
   /** 生成完成的完整 Markdown 回复 */
   error?: string
   startedAt?: number
@@ -79,13 +86,29 @@ export interface CompareTask {
   durationMs?: number
   /** 该任务使用的标签页（重试可复用） */
   tabId?: number
+  /**
+   * 多轮对话：本任务所属轮次（从 1 起）。追问会在同一批 tasks 数组中
+   * 追加新任务（新 requestId，同 aiId，turn+1），旧轮任务保留供 UI 展示历史。
+   */
+  turn?: number
+  /** 本轮的追问文本（turn >= 2 时有值；turn 1 即 batch.prompt） */
+  turnPrompt?: string
 }
 
 export interface CompareBatch {
   batchId: string
+  /** 第一轮的问题 */
   prompt: string
   createdAt: number
   tasks: CompareTask[]
+  /**
+   * 多轮对话历史（扁平序，用于在 AI 页面侧理解上下文——实际上下文由
+   * 各 AI 站点自己的会话保持，这里主要用于 UI 展示与「新标签页冷启动」时
+   * 把历史一次性拼接提交）。
+   */
+  turns?: { turn: number; prompt: string; askedAt: number; attachments?: CompareAttachment[] }[]
+  /** 当前最新轮次（从 1 起） */
+  currentTurn?: number
 }
 
 // ---- 消息信封 ----
@@ -104,6 +127,7 @@ export interface CompareEnvelope {
 
 export type ComparePanelMsgType =
   | 'DISPATCH_BATCH'
+  | 'FOLLOWUP_BATCH' // 多轮追问：同一批平台在既有会话上继续提问
   | 'RETRY_REQUEST'
   | 'CANCEL_REQUEST'
   | 'CANCEL_BATCH'
@@ -116,6 +140,30 @@ export interface DispatchBatchPayload {
   aiIds: CompareAiId[]
   /** 超时毫秒数（默认 120s） */
   timeoutMs?: number
+}
+
+/** 追问载荷：batchId 定位现有批次，prompt 为本轮问题 */
+export interface FollowupPayload {
+  batchId: string
+  prompt: string
+  timeoutMs?: number
+  /** 随追问一起注入各平台的附件（图片/文件，dataUrl 传输） */
+  attachments?: CompareAttachment[]
+}
+
+/**
+ * 随问题批量发送的附件（图片 / PDF / 文档等任意 MIME）。
+ * 传输用 dataUrl；注入端转 File 走 paste 通道（各 AI 站输入框的通用
+ * 受支持交互，参考 grok2api asset_upload：官方通道收 fileName+MIME+base64，
+ * 任意类型同构，网页侧即 paste 任意 File）。
+ */
+export interface CompareAttachment {
+  /** 原始文件名（注入端用它构造 File，站点展示附件名） */
+  name: string
+  /** MIME 类型（如 image/png、application/pdf） */
+  mime: string
+  /** base64 dataUrl（含前缀） */
+  dataUrl: string
 }
 
 export interface BatchStateSnapshot {
@@ -149,11 +197,35 @@ export type CompareUpstreamType =
   | 'GENERATION_FAILED'
   | 'CONTENT_UNAVAILABLE' // 页面刷新 / 导航 / CS 失效
 
+/** 上行事件 payload：结构化回答快照（text 为兼容旧字段，恒等于 content） */
+export interface CompareAnswerPayload {
+  /** 正式回答 markdown */
+  content?: string
+  /** 思考/推理过程（独立于正文） */
+  thinking?: string
+  /** 回答中的图片 URL */
+  images?: string[]
+  /** 兼容旧协议：等价于 content */
+  text?: string
+  error?: string
+}
+
 /** Port 名称与 storage key 约定 */
 export const COMPARE_PORT = 'orbitshot-compare'
 export const COMPARE_STORAGE_PREFIX = 'orbitshot.compare.'
 export const COMPARE_CURRENT_KEY = COMPARE_STORAGE_PREFIX + 'current'
 export const COMPARE_HISTORY_KEY = COMPARE_STORAGE_PREFIX + 'history'
 
-/** 单次任务默认超时 */
-export const DEFAULT_TASK_TIMEOUT_MS = 120_000
+/**
+ * 生成阶段超时语义（双层）：
+ * - idle 超时：距最后一次流式增量 45s 无更新 → 判超时（流式正常推进的任务永不误杀）；
+ * - 总时长上限：整个生成阶段最多 600s（DeepSeek R1 思考 + 长回答的保守上限；
+ *   思考/正文心跳会持续续期 idle，总上限只防真正的无限挂起）。
+ * 提交链路（开页/等CS/提交）超时由各阶段自身等待窗口约束，不走看门狗。
+ * 「AI 长时间不回复」的真静默场景由 CS 侧 DOM 活动检测报 NO_RESPONSE，
+ * 不依赖时间猜测。
+ */
+export const IDLE_TIMEOUT_MS = 45_000
+export const MAX_GENERATION_MS = 600_000
+/** 兼容旧引用：任务级默认超时（现仅作为 dispatchBatch 的入参缺省） */
+export const DEFAULT_TASK_TIMEOUT_MS = IDLE_TIMEOUT_MS

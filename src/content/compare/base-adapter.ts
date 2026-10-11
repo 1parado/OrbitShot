@@ -22,6 +22,11 @@ export interface DomProbe {
   generating?: string[]
   /** 生成结束标志（可选，如「重新生成」按钮出现） */
   finished?: string[]
+  /**
+   * 思考/推理块选择器（可选）：命中的子树从正文中剥离，
+   * 单独捕获为 task.thinking（与 grok2api reasoning 字段同构）
+   */
+  thinking?: string[]
 }
 
 export interface PromptSubmitResult {
@@ -62,45 +67,74 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
  * 往输入区填文本并验证真实生效。
- * - contenteditable：聚焦 → execCommand('insertText')（走浏览器原生输入路径，
- *   React 受控编辑器一般会收到 input 事件）；失败回退 paste 事件合成。
+ * - contenteditable：聚焦 → 光标手动 range 定位到内容末尾（不依赖当前
+ *   selection 位置——站点注入附件后可能抢走焦点/选择）→ execCommand
+ *   'insertText'（走浏览器原生输入路径，React 受控编辑器会收到 input 事件）；
+ *   失败回退 paste 事件合成。
  * - textarea/input：设 value + 派发 input 事件（React 需要原生 setter）。
- * 填充后读取真实内容比对，不匹配即报错。
+ * 填充后读取真实内容比对，不匹配清空重试一轮（部分站点注入附件后编辑器
+ * 短暂拒绝输入，如 ChatGPT 图片粘贴后的焦点抖动）。
  */
 export async function fillComposer(el: HTMLElement, text: string): Promise<boolean> {
   const isContentEditable =
     el instanceof HTMLElement && el.isContentEditable
-  el.focus()
-  await sleep(120)
-  if (isContentEditable) {
-    const sel = window.getSelection()
-    // 光标移到末尾
-    if (sel && el.contains(sel.anchorNode)) {
-      sel.selectAllChildren(el)
-      sel.collapseToEnd()
+  const target = text.replace(/\s+/g, '').slice(0, 120)
+
+  const tryOnce = async (): Promise<boolean> => {
+    el.focus()
+    await sleep(160)
+    if (isContentEditable) {
+      // 手动把光标定位到内容末尾
+      const sel = window.getSelection()
+      if (sel) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        range.collapse(false)
+        sel.removeAllRanges()
+        sel.addRange(range)
+      }
+      const ok = document.execCommand('insertText', false, text)
+      if (!ok) {
+        // 回退：合成 paste 事件
+        const dt = new DataTransfer()
+        dt.setData('text/plain', text)
+        el.dispatchEvent(
+          new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt })
+        )
+      }
+    } else {
+      const setter = Object.getOwnPropertyDescriptor(
+        (el as HTMLTextAreaElement).constructor.prototype,
+        'value'
+      )?.set
+      if (setter) setter.call(el, text)
+      else (el as HTMLTextAreaElement).value = text
+      el.dispatchEvent(new Event('input', { bubbles: true }))
     }
-    const ok = document.execCommand('insertText', false, text)
-    if (!ok) {
-      // 回退：合成 paste 事件
-      const dt = new DataTransfer()
-      dt.setData('text/plain', text)
-      el.dispatchEvent(
-        new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt })
-      )
-    }
-  } else {
-    const setter = Object.getOwnPropertyDescriptor(
-      (el as HTMLTextAreaElement).constructor.prototype,
-      'value'
-    )?.set
-    if (setter) setter.call(el, text)
-    else (el as HTMLTextAreaElement).value = text
-    el.dispatchEvent(new Event('input', { bubbles: true }))
+    await sleep(220)
+    // 验证：编辑器真实内容包含目标文本（允许站点做 markdown 规范化差异）
+    const cur = readComposerText(el)
+    return cur.replace(/\s+/g, '').includes(target)
   }
-  await sleep(200)
-  // 验证：编辑器真实内容包含目标文本（允许站点做 markdown 规范化差异）
-  const cur = readComposerText(el)
-  return cur.replace(/\s+/g, '').includes(text.replace(/\s+/g, '').slice(0, 120))
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (await tryOnce()) return true
+    // 重试前清空（选全删），避免残留半截内容干扰第二次填充
+    if (isContentEditable) {
+      const sel = window.getSelection()
+      if (sel) {
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        sel.removeAllRanges()
+        sel.addRange(range)
+        document.execCommand('delete')
+      }
+    } else if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+      el.value = ''
+    }
+    await sleep(200)
+  }
+  return false
 }
 
 export function readComposerText(el: HTMLElement): string {
