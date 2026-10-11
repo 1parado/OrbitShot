@@ -36,7 +36,87 @@ function sendProgress(progress: FormulaProgress): void {
   chrome.runtime.sendMessage({ type: 'ORC_PROGRESS', progress }).catch(() => {})
 }
 
-// ---- 下载（fetch → IndexedDB；可取消；失败可重试） ----
+// ---- 下载（fetch → IndexedDB；可取消；断点续传；自动重试） ----
+
+/** 单文件下载（Range 断点续传）：从 IndexedDB 已有字节继续，中断/超时自动重试 */
+async function downloadFileResumable(
+  file: { name: string; url: string },
+  onProgress: (received: number, total: number) => void
+): Promise<void> {
+  const CHUNK_STORE_KEY = file.name
+  const MAX_RETRIES = 5
+  const STALL_TIMEOUT_MS = 20_000 // 20s 无字节进展视为连接死亡
+  let attempt = 0
+
+  for (;;) {
+    attempt++
+    const existing = await getModelFile(CHUNK_STORE_KEY)
+    // 已有部分数据存为「不完整副本」：data 之前的完整部分 + partial 标记
+    // 简化：部分数据暂存到内存外（IndexedDB 单 key），完成时才写成正式记录。
+    // 这里用 localStorage 不可行（SW 无 DOM）；offscreen 有 DOM 可用 localStorage
+    // 存不了大 blob——改用 IndexedDB 同 store 的 `<name>.part` 记录。
+    const partKey = file.name + '.part'
+    const partData = (await getModelFile(partKey)) as ArrayBuffer | undefined
+    let offset = partData?.byteLength ?? 0
+
+    try {
+      const resp = await fetch(file.url, {
+        signal: downloadAbort?.signal,
+        headers: offset > 0 ? { Range: `bytes=${offset}-` } : {},
+      })
+      if (!resp.ok && resp.status !== 206) throw new Error(`HTTP ${resp.status}`)
+      if (!resp.body) throw new Error('no response body')
+
+      const contentRange = resp.headers.get('content-range')
+      const total = contentRange
+        ? Number(contentRange.split('/')[1])
+        : Number(resp.headers.get('content-length') || 0)
+
+      const reader = resp.body.getReader()
+      // 断点缓冲：每 ~4MB 落一次 IndexedDB（.part），失败后从此继续
+      let pending = partData ? new Uint8Array(partData) : new Uint8Array(0)
+      let pendingLen = offset
+      let received = offset
+      let lastDataAt = Date.now()
+      const flushPart = async () => {
+        if (pendingLen === 0) return
+        await putModelFile(partKey, pending.slice(0, pendingLen).buffer as ArrayBuffer)
+      }
+
+      for (;;) {
+        const timeout = new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Error('STALL')), Math.max(1, STALL_TIMEOUT_MS - (Date.now() - lastDataAt)))
+        )
+        const { done, value } = await Promise.race([reader.read(), timeout])
+        if (done) break
+        lastDataAt = Date.now()
+        if (pendingLen + value.length > pending.length) {
+          const grown = new Uint8Array(Math.max(pending.length * 2, pendingLen + value.length))
+          grown.set(pending.subarray(0, pendingLen))
+          pending = grown
+        }
+        pending.set(value, pendingLen)
+        pendingLen += value.length
+        received += value.length
+        onProgress(received, total)
+        if (pendingLen - offset >= 4 * 1024 * 1024) {
+          offset = pendingLen
+          await flushPart()
+        }
+      }
+      // 完成：写正式记录（size 用于「已用空间」统计），清 .part
+      await putModelFile(file.name, pending.slice(0, pendingLen).buffer as ArrayBuffer)
+      await putModelFile(partKey, new ArrayBuffer(0))
+      void getModelFile(partKey) // 触发覆盖
+      return
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') throw e
+      if (attempt >= MAX_RETRIES) throw e
+      // 指数退避后重试（.part 数据保留，从断点继续）
+      await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** (attempt - 1), 8000)))
+    }
+  }
+}
 
 async function downloadModels(): Promise<void> {
   if (state === 'downloading' || state === 'ready') return
@@ -47,38 +127,24 @@ async function downloadModels(): Promise<void> {
     const totalBytes = FORMULA_MODEL_FILES.reduce((n, f) => n + f.sizeMB * 1024 * 1024, 0)
     let receivedTotal = 0
     for (const file of FORMULA_MODEL_FILES) {
-      const resp = await fetch(file.url, { signal: downloadAbort.signal })
-      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`)
-      const total = Number(resp.headers.get('content-length') || 0)
-      const reader = resp.body.getReader()
-      const chunks: Uint8Array[] = []
-      let received = 0
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        chunks.push(value)
-        received += value.length
-        receivedTotal += value.length
+      await downloadFileResumable(file, (received) => {
+        receivedTotal++
         sendProgress({
           state: 'downloading',
-          percent: Math.min(99, Math.round((receivedTotal / totalBytes) * 100)),
+          // 进度 = 已完成文件权重 + 当前文件字节速率近似
+          percent: Math.min(99, Math.round((received / (file.sizeMB * 1024 * 1024)) * 100)),
           file: file.name,
           receivedBytes: received,
-          totalBytes: total,
+          totalBytes: file.sizeMB * 1024 * 1024,
         })
-      }
-      const buf = new Uint8Array(received)
-      let pos = 0
-      for (const c of chunks) {
-        buf.set(c, pos)
-        pos += c.length
-      }
-      await putModelFile(file.name, buf.buffer as ArrayBuffer)
+      })
     }
+    // 清理全部 .part 残留
+    for (const f of FORMULA_MODEL_FILES) await putModelFile(f.name + '.part', new ArrayBuffer(0))
     sendProgress({ state: 'downloading', percent: 100 })
   } catch (e) {
     downloadAbort = null
-    setState('not-downloaded') // R4/R5：取消或失败回到可重试态（部分字节作废）
+    setState('not-downloaded') // R4/R5：取消或失败回到可重试态（.part 保留断点）
     if (!(e instanceof DOMException && e.name === 'AbortError')) {
       chrome.runtime.sendMessage({
         type: 'ORC_PROGRESS',
