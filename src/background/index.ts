@@ -7,6 +7,7 @@ import { injectFiles } from './ai-injector'
 import type { InjectResult } from './ai-injector'
 import { addShot, getShot, countShots, blobToDataUrl, MAX_SHOTS } from './shots'
 import { pingTab, ensureContentScript } from './cs-utils'
+import { handleFormulaContentMsg, handleFormulaOffscreenReply } from './formula-ocr'
 import {
   dispatchBatch,
   followUpBatch,
@@ -354,6 +355,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {  if (msg?.
       .then((batch) => sendResponse({ ok: true, batch } satisfies BatchStateSnapshot))
       .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true
+  }
+
+  // ---- 公式识别（Formula → LaTeX，offscreen 本地推理） ----
+
+  if (typeof msg?.type === 'string' && msg.type.startsWith('FORMULA_')) {
+    handleFormulaContentMsg(msg as Record<string, unknown>)
+      .then(sendResponse)
+      .catch((e: Error) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  // offscreen → SW 回传（ORC_*）：转广播给所有 UI
+  if (typeof msg?.type === 'string' && msg.type.startsWith('ORC_')) {
+    handleFormulaOffscreenReply(msg as never)
+    return
   }
 })
 

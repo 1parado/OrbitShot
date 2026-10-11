@@ -4,8 +4,9 @@
 // + 多行文字（textarea：Enter 换行、Ctrl+Enter 完成、Esc 取消、双击再编辑）
 // + Delete 删除选中 + 橡皮擦可擦除任意标注（含文字） + 撤销重做 + 滚轮调线宽
 import type { SelRect } from './selector'
+import { openFormulaPanel } from './formula-panel'
 
-type Tool = 'arrow' | 'rect' | 'ellipse' | 'pen' | 'text' | 'marker' | 'blur' | 'eraser'
+type Tool = 'arrow' | 'rect' | 'ellipse' | 'pen' | 'text' | 'marker' | 'blur' | 'eraser' | 'formula'
 
 const COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#111827']
 const SIZES = [2, 4, 7] // CSS px
@@ -19,6 +20,7 @@ const TOOL_LIST: { id: Tool | 'select'; icon: string; title: string }[] = [
   { id: 'marker', icon: '🖍', title: '高亮（再次点击退出绘制）' },
   { id: 'blur', icon: '▒', title: '模糊（拖拽框选 / 单击打码，滚轮调粗细；再次点击退出）' },
   { id: 'eraser', icon: '🧽', title: '橡皮擦（点击或划过标注即可擦除，含文字框）' },
+  { id: 'formula', icon: '∑', title: '公式识别：框选公式区域，本地转为 LaTeX 并复制（再次点击退出，快捷键 F）' },
 ]
 
 export interface Ann {
@@ -171,7 +173,15 @@ export function startAnnotator(
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
 
-      if (c.kind === 'rect' || c.kind === 'ellipse' || c.kind === 'blur') {
+      if (c.kind === 'formula') {
+        // 公式框选：蓝色虚线框（不产生标注，仅示意当前框选区域）
+        ctx.save()
+        ctx.strokeStyle = '#38bdf8'
+        ctx.setLineDash([8 * dpr, 6 * dpr])
+        ctx.lineWidth = Math.max(1, 2 * dpr)
+        ctx.strokeRect(c.x!, c.y!, c.w!, c.h!)
+        ctx.restore()
+      } else if (c.kind === 'rect' || c.kind === 'ellipse' || c.kind === 'blur') {
         const x = c.x!
         const y = c.y!
         const w = c.w!
@@ -652,6 +662,15 @@ export function startAnnotator(
         canvas.setPointerCapture(e.pointerId)
         return
       }
+      // 公式框选：与 rect 相同的拖拽手势，但不命中/不拖动已有标注
+      if (tool === 'formula') {
+        selected = null
+        startPt = p
+        current = { kind: 'formula', x: p.x, y: p.y, w: 0, h: 0 }
+        canvas.setPointerCapture(e.pointerId)
+        scheduleRender()
+        return
+      }
       // 绘制类工具：命中已有标注 → 选中并拖动；按住 Ctrl/Mac ⌘ 则跳过强制绘制
       const hit = e.ctrlKey || e.metaKey ? null : hitTest(p)
       if (hit) {
@@ -743,7 +762,7 @@ export function startAnnotator(
         return
       }
       if (!startPt || !current) return
-      if (current.kind === 'rect' || current.kind === 'ellipse' || current.kind === 'blur') {
+      if (current.kind === 'rect' || current.kind === 'ellipse' || current.kind === 'blur' || current.kind === 'formula') {
         current.x = Math.min(startPt.x, p.x)
         current.y = Math.min(startPt.y, p.y)
         current.w = Math.abs(p.x - startPt.x)
@@ -799,6 +818,35 @@ export function startAnnotator(
       }
       if (!current || !startPt) return
       const p = pUp
+      // 公式框选收尾：不产生标注；太小 toast 提示；否则裁剪发送识别并回到
+      // 框选模式（连续识别多个公式，Esc 退出）
+      if (current.kind === 'formula') {
+        const fx = current.x!
+        const fy = current.y!
+        const fw = current.w!
+        const fh = current.h!
+        current = null
+        startPt = null
+        render()
+        if (fw < 24 || fh < 24) {
+          showFormulaHint('框选区域太小，请框住完整公式')
+          return
+        }
+        const pad = 4 * dpr
+        const sx = Math.max(0, fx - pad)
+        const sy = Math.max(0, fy - pad)
+        const sw = Math.min(base.width - sx, fw + pad * 2)
+        const sh = Math.min(base.height - sy, fh + pad * 2)
+        const cv = document.createElement('canvas')
+        cv.width = Math.round(sw)
+        cv.height = Math.round(sh)
+        cv.getContext('2d')!.drawImage(base, sx, sy, sw, sh, 0, 0, cv.width, cv.height)
+        openFormulaPanel(shadow, cv.toDataURL('image/png'), {
+          x: sel.x + sx / dpr,
+          y: sel.y + (sy + sh) / dpr,
+        })
+        return
+      }
       // 太小的图形忽略（误触 / 仅点击取消选中的情形）
       if (
         (current.kind === 'rect' || current.kind === 'ellipse') &&
@@ -1007,6 +1055,14 @@ export function startAnnotator(
     }
 
     // ---- 工具栏 ----
+    /** 顶部轻提示（公式框选太小等场景），2.2s 自动消失 */
+    const showFormulaHint = (text: string) => {
+      const hint = document.createElement('div')
+      hint.className = 'os-hint'
+      hint.textContent = text
+      shadow.appendChild(hint)
+      setTimeout(() => hint.remove(), 2200)
+    }
     const btn = (html: string, title: string, onClick: () => void, cls = 'os-tbtn') => {
       const b = document.createElement('button')
       b.className = cls

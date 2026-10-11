@@ -333,6 +333,9 @@ export default function Options() {
   const [stashHotkey, setStashHotkey] = useState('')
   const [fontScale, setFontScale] = useState(1)
   const [compareMode, setCompareMode] = useState(false)
+  const [formulaState, setFormulaState] = useState<string>('not-downloaded')
+  const [formulaUsageMB, setFormulaUsageMB] = useState<number | null>(null)
+  const [formulaDeletedOnce, setFormulaDeletedOnce] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [status, setStatus] = useState('')
   const [statusErr, setStatusErr] = useState(false)
@@ -347,9 +350,50 @@ export default function Options() {
       setStashHotkey(s.stashHotkey ?? '')
       setFontScale(s.fontScale ?? 1)
       setCompareMode(s.compareMode === true)
+      setFormulaDeletedOnce(s.formulaModelDeletedOnce === true)
       setCollapsed(s.sidebarCollapsed === true)
     })
   }, [])
+
+  // 公式识别模型状态：查询 + 订阅广播（下载进度/状态变更实时刷新）
+  useEffect(() => {
+    let alive = true
+    const refreshUsage = () => {
+      import('../background/formula-model-store').then(({ modelsUsageBytes }) =>
+        modelsUsageBytes().then((b) => {
+          if (alive) setFormulaUsageMB(Math.round((b / 1048576) * 10) / 10)
+        })
+      ).catch(() => {})
+    }
+    void chrome.runtime
+      .sendMessage({ type: 'FORMULA_MODEL_STATE' })
+      .then((r: { ok: boolean; state?: string }) => {
+        if (alive && r?.state) setFormulaState(r.state)
+        refreshUsage()
+      })
+      .catch(() => {})
+    const onMsg = (m: { type?: string; state?: string; progress?: { state?: string; percent?: number } }) => {
+      if (m.type === 'FORMULA_STATE' && m.state) setFormulaState(m.state)
+      if (m.type === 'FORMULA_PROGRESS' && m.progress?.state) setFormulaState(m.progress.state)
+    }
+    chrome.runtime.onMessage.addListener(onMsg)
+    return () => {
+      alive = false
+      chrome.runtime.onMessage.removeListener(onMsg)
+    }
+  }, [])
+
+  const formulaAction = (type: 'FORMULA_MODEL_DOWNLOAD' | 'FORMULA_MODEL_CANCEL' | 'FORMULA_MODEL_DELETE') => {
+    void chrome.runtime.sendMessage({ type })
+    if (type === 'FORMULA_MODEL_DELETE') {
+      setFormulaState('not-downloaded')
+      setFormulaUsageMB(null)
+      setFormulaDeletedOnce(true)
+      void import('../shared/settings').then(({ loadSettings, saveSettings }) =>
+        loadSettings().then((s) => saveSettings({ ...s, formulaModelDeletedOnce: true }))
+      )
+    }
+  }
 
   // Ctrl+K 聚焦搜索框（侧边栏折叠时先展开）
   useEffect(() => {
@@ -801,6 +845,69 @@ export default function Options() {
                     }`}
                   />
                 </button>
+              </SettingRow>
+              <SettingRow
+                title={
+                  <span className="flex items-center gap-2">
+                    {t(lang, 'formula.title')}
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                      {t(lang, 'pref.experimental')}
+                    </span>
+                  </span>
+                }
+                desc={t(lang, 'formula.model.size', { n: '134' }) + ' · ' + t(lang, 'formula.privacy')}
+              >
+                <div className="flex flex-col items-end gap-2">
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                      formulaState === 'ready'
+                        ? 'bg-emerald-50 text-emerald-600'
+                        : formulaState === 'downloading' || formulaState === 'initializing'
+                          ? 'bg-sky-50 text-sky-600'
+                          : 'bg-slate-100 text-slate-500'
+                    }`}
+                  >
+                    {formulaState === 'ready'
+                      ? t(lang, 'formula.model.readybadge')
+                      : formulaState === 'downloading'
+                        ? t(lang, 'formula.model.downloading', { n: '…' })
+                        : formulaState === 'initializing'
+                          ? t(lang, 'formula.model.verifying')
+                          : t(lang, 'formula.model.notready')}
+                  </span>
+                  {formulaState === 'ready' ? (
+                    <button
+                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-600 transition hover:border-red-300 hover:text-red-600"
+                      onClick={() => {
+                        if (confirm(t(lang, 'formula.model.delete.confirm'))) {
+                          formulaAction('FORMULA_MODEL_DELETE')
+                          flash(t(lang, 'formula.model.deleted'))
+                        }
+                      }}
+                    >
+                      {t(lang, 'formula.model.delete')}
+                    </button>
+                  ) : formulaState === 'downloading' || formulaState === 'initializing' ? (
+                    <button
+                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-600 transition hover:border-slate-300"
+                      onClick={() => formulaAction('FORMULA_MODEL_CANCEL')}
+                    >
+                      {t(lang, 'formula.close')}
+                    </button>
+                  ) : (
+                    <button
+                      className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-600"
+                      onClick={() => formulaAction('FORMULA_MODEL_DOWNLOAD')}
+                    >
+                      {t(lang, formulaDeletedOnce ? 'formula.model.retry' : 'formula.model.download')}
+                    </button>
+                  )}
+                  {formulaState === 'ready' && formulaUsageMB !== null && (
+                    <span className="text-[11px] text-slate-400">
+                      {t(lang, 'formula.model.usage', { n: String(formulaUsageMB) })}
+                    </span>
+                  )}
+                </div>
               </SettingRow>
             </div>
           )}

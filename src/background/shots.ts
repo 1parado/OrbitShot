@@ -30,6 +30,8 @@ export interface ShotRecord {
 
 const DB_NAME = 'orbitshot'
 const STORE = 'shots'
+/** v2：新增 models store（公式识别模型，见 formula-model-store.ts） */
+const DB_VERSION = 2
 export const MAX_SHOTS = 50
 
 let dbPromise: Promise<IDBDatabase> | null = null
@@ -37,12 +39,16 @@ let dbPromise: Promise<IDBDatabase> | null = null
 function openDb(): Promise<IDBDatabase> {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1)
+      const req = indexedDB.open(DB_NAME, DB_VERSION)
       req.onupgradeneeded = () => {
         const db = req.result
         if (!db.objectStoreNames.contains(STORE)) {
           const st = db.createObjectStore(STORE, { keyPath: 'id' })
           st.createIndex('order', 'order')
+        }
+        if (!db.objectStoreNames.contains('models')) {
+          // 公式识别模型（out-of-line key = 文件名），CRUD 在 formula-model-store.ts
+          db.createObjectStore('models')
         }
       }
       req.onsuccess = () => resolve(req.result)

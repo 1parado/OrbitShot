@@ -17,6 +17,7 @@ export default defineConfig({
       input: {
         staging: 'src/staging/index.html',
         sidepanel: 'src/sidepanel/index.html',
+        'formula-offscreen': 'src/background/formula-offscreen.html',
       },
     },
   },

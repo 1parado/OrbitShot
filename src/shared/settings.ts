@@ -97,6 +97,8 @@ export interface Settings {
    * 各平台的文字回答。关闭 = 完全保持原有行为（仅注入截图）。
    */
   compareMode?: boolean
+  /** 公式识别：用户删除过模型（再次引导时文案改为「重新下载」） */
+  formulaModelDeletedOnce?: boolean
 }
 
 export async function loadSettings(): Promise<Settings> {
