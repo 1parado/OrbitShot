@@ -219,7 +219,7 @@ function AiRow(props: {
 
 /* ---------- 通用设置行：左标题+描述，右控件 ---------- */
 function SettingRow(props: {
-  title: string
+  title: React.ReactNode
   desc?: string
   children: React.ReactNode
 }) {
@@ -332,6 +332,7 @@ export default function Options() {
   const [hotkey, setHotkey] = useState('')
   const [stashHotkey, setStashHotkey] = useState('')
   const [fontScale, setFontScale] = useState(1)
+  const [compareMode, setCompareMode] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [status, setStatus] = useState('')
   const [statusErr, setStatusErr] = useState(false)
@@ -345,6 +346,7 @@ export default function Options() {
       setHotkey(s.hotkey ?? '')
       setStashHotkey(s.stashHotkey ?? '')
       setFontScale(s.fontScale ?? 1)
+      setCompareMode(s.compareMode === true)
       setCollapsed(s.sidebarCollapsed === true)
     })
   }, [])
@@ -373,7 +375,7 @@ export default function Options() {
     setTimeout(() => setStatus(''), 1800)
   }
 
-  const persist = (patch: Partial<{ aiList: AiSite[]; hotkey: string; stashHotkey: string; fontScale: number; sidebarCollapsed: boolean }>) => {
+  const persist = (patch: Partial<{ aiList: AiSite[]; hotkey: string; stashHotkey: string; fontScale: number; sidebarCollapsed: boolean; compareMode: boolean }>) => {
     loadSettings().then((s) => saveSettings({ ...s, ...patch }))
   }
 
@@ -769,6 +771,36 @@ export default function Options() {
                     </option>
                   ))}
                 </select>
+              </SettingRow>
+              <SettingRow
+                title={
+                  <span className="flex items-center gap-2">
+                    {t(lang, 'pref.compare')}
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                      {t(lang, 'pref.experimental')}
+                    </span>
+                  </span>
+                }
+                desc={t(lang, 'pref.compare.desc')}
+              >
+                <button
+                  role="switch"
+                  aria-checked={compareMode}
+                  onClick={() => {
+                    const v = !compareMode
+                    setCompareMode(v)
+                    persist({ compareMode: v })
+                  }}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                    compareMode ? 'bg-blue-500' : 'bg-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+                      compareMode ? 'left-[22px]' : 'left-0.5'
+                    }`}
+                  />
+                </button>
               </SettingRow>
             </div>
           )}

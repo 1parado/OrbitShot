@@ -232,6 +232,15 @@ export function showRadial(
       e.stopPropagation()
       cleanup()
       onPick('dismiss')
+      return
+    }
+    // 多选模式：Enter 确认批量发送（与点中心把手等价）
+    if (e.key === 'Enter' && opts?.multi && selected.size > 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      const ids = [...selected]
+      cleanup()
+      opts.multi.onConfirm(ids)
     }
   }
 

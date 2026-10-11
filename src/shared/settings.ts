@@ -92,6 +92,11 @@ export interface Settings {
   fontScale?: number
   /** 设置页侧边栏是否折叠 */
   sidebarCollapsed?: boolean
+  /**
+   * 多模型对比模式：批量发送到 ≥2 个平台时，是否在侧边栏并排展示
+   * 各平台的文字回答。关闭 = 完全保持原有行为（仅注入截图）。
+   */
+  compareMode?: boolean
 }
 
 export async function loadSettings(): Promise<Settings> {
@@ -110,9 +115,10 @@ export async function loadSettings(): Promise<Settings> {
           stashHotkey: s.stashHotkey ?? '',
           fontScale: typeof s.fontScale === 'number' && s.fontScale > 0 ? s.fontScale : 1,
           sidebarCollapsed: s.sidebarCollapsed === true,
+          compareMode: s.compareMode === true,
         })
       } else {
-        resolve({ aiList: DEFAULT_AI_LIST, lang: detectLang(), hotkey: '', stashHotkey: '', fontScale: 1, sidebarCollapsed: false })
+        resolve({ aiList: DEFAULT_AI_LIST, lang: detectLang(), hotkey: '', stashHotkey: '', fontScale: 1, sidebarCollapsed: false, compareMode: false })
       }
     })
   })

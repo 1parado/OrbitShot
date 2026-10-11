@@ -10,6 +10,10 @@ import { captureFullPage } from './fullpage'
 import { loadSettings, iconForSite, faviconCandidates, comboFromEvent } from '../shared/settings'
 import type { AiSite, Lang } from '../shared/settings'
 import { t } from '../shared/i18n'
+import { initCompareContent } from './compare/compare-entry'
+
+// 多模型对比模块：仅在 ChatGPT / Claude / Gemini 页面注册监听（内部自行判断 host）
+initCompareContent()
 
 let host: HTMLDivElement | null = null
 let shadow: ShadowRoot | null = null
@@ -213,7 +217,13 @@ async function stashShot(
 }
 
 /** 发送到单个 AI：剪贴板兜底复制 → 后台开/复用标签页并自动注入 → 按真实结果提示 */
-async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiSite): Promise<void> {  let copied = true
+async function sendToAi(
+  shadow: ShadowRoot,
+  canvas: HTMLCanvasElement,
+  site: AiSite,
+  batch?: { aiIds: string[]; batchKey: string; prompt: string; attachments?: CmpAttachment[] }
+): Promise<void> {
+  let copied = true
   try {
     await copyCanvas(canvas)
   } catch {
@@ -227,6 +237,8 @@ async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiS
       url: site.url,
       name: site.name,
       dataUrl,
+      // 多平台批量：SW 注入截图成功后接着提交问题文本并观察回答（compareMode 开启时）
+      ...(batch ? { batchSend: batch } : {}),
     })) as { ok?: boolean; status?: string; error?: string } | null
   } catch {
     resp = null
@@ -250,20 +262,204 @@ async function sendToAi(shadow: ShadowRoot, canvas: HTMLCanvasElement, site: AiS
   }
 }
 
-/** 批量发送：逐个完成「开页 → 注入 → 验证」，互不串线 */
+interface CmpAttachment {
+  name: string
+  mime: string
+  dataUrl: string
+}
+
+const CMP_MAX_ATTACHMENTS = 5
+const CMP_MAX_FILE_BYTES = 8 * 1024 * 1024
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result))
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(file)
+  })
+}
+
+/**
+ * 多模型对比：批量确认后当场弹出输入框，问题文本与截图/附件一起提交。
+ * 返回 null 表示用户取消（不发送）；attachments 为用户附加的图片/文件。
+ */
+function showComparePrompt(
+  shadow: ShadowRoot,
+  sites: AiSite[]
+): Promise<{ prompt: string; attachments: CmpAttachment[] } | null> {
+  return new Promise((resolve) => {
+    const box = document.createElement('div')
+    box.className = 'os-cmp-box'
+
+    const title = document.createElement('div')
+    title.className = 'os-cmp-box-title'
+    title.textContent = t(lang, 'cmp.send.title')
+
+    const chips = document.createElement('div')
+    chips.className = 'os-cmp-chips'
+    for (const s of sites) {
+      const chip = document.createElement('span')
+      chip.className = 'os-cmp-chip'
+      const icon = iconForSite(s.id)
+      if (icon) {
+        const img = document.createElement('img')
+        img.src = icon
+        img.alt = ''
+        chip.appendChild(img)
+      }
+      chip.appendChild(document.createTextNode(s.name))
+      chips.appendChild(chip)
+    }
+
+    const ta = document.createElement('textarea')
+    ta.className = 'os-cmp-text'
+    ta.placeholder = t(lang, 'cmp.ph')
+    ta.rows = 3
+
+    // ---- 附件行：📎 按钮触发 file input，选中后显示可删除的文件 chips ----
+    const attachments: CmpAttachment[] = []
+    const fileInput = document.createElement('input')
+    fileInput.type = 'file'
+    fileInput.multiple = true
+    fileInput.style.display = 'none'
+
+    const attachRow = document.createElement('div')
+    attachRow.className = 'os-cmp-attach-row'
+    const attachBtn = document.createElement('button')
+    attachBtn.type = 'button'
+    attachBtn.className = 'os-cmp-attach-btn'
+    attachBtn.title = t(lang, 'cmp.follow.attach')
+    attachBtn.textContent = '📎 ' + t(lang, 'cmp.follow.attach')
+    const fileChips = document.createElement('div')
+    fileChips.className = 'os-cmp-file-chips'
+
+    const renderFileChips = () => {
+      fileChips.innerHTML = ''
+      for (const a of attachments) {
+        const chip = document.createElement('span')
+        chip.className = 'os-cmp-file-chip'
+        const name = document.createElement('span')
+        name.textContent = a.name
+        name.title = a.name
+        const del = document.createElement('button')
+        del.type = 'button'
+        del.textContent = '✕'
+        del.addEventListener('click', () => {
+          attachments.splice(attachments.indexOf(a), 1)
+          renderFileChips()
+        })
+        chip.append(name, del)
+        fileChips.appendChild(chip)
+      }
+      fileChips.style.display = attachments.length ? 'flex' : 'none'
+    }
+    attachBtn.addEventListener('click', () => fileInput.click())
+    fileInput.addEventListener('change', async () => {
+      const files = Array.from(fileInput.files ?? [])
+      fileInput.value = ''
+      for (const f of files) {
+        if (attachments.length >= CMP_MAX_ATTACHMENTS) {
+          hintEl.textContent = t(lang, 'cmp.attach.tooMany', { n: CMP_MAX_ATTACHMENTS })
+          break
+        }
+        if (f.size > CMP_MAX_FILE_BYTES) {
+          hintEl.textContent = t(lang, 'cmp.attach.tooBig')
+          continue
+        }
+        try {
+          attachments.push({ name: f.name, mime: f.type || 'application/octet-stream', dataUrl: await readAsDataUrl(f) })
+        } catch {
+          /* 读取失败：跳过该文件 */
+        }
+      }
+      renderFileChips()
+    })
+    fileChips.style.display = 'none'
+    attachRow.append(attachBtn, fileInput, fileChips)
+
+    const actions = document.createElement('div')
+    actions.className = 'os-cmp-actions'
+    const cancelBtn = document.createElement('button')
+    cancelBtn.className = 'os-cmp-btn os-cmp-btn-cancel'
+    cancelBtn.textContent = t(lang, 'cmp.send.cancel')
+    const sendBtn = document.createElement('button')
+    sendBtn.className = 'os-cmp-btn os-cmp-btn-send'
+    sendBtn.textContent = t(lang, 'cmp.send.go')
+
+    const hintEl = document.createElement('div')
+    hintEl.className = 'os-cmp-hint'
+    hintEl.textContent = t(lang, 'cmp.send.hint')
+
+    const done = (v: { prompt: string; attachments: CmpAttachment[] } | null) => {
+      box.remove()
+      resolve(v)
+    }
+    cancelBtn.addEventListener('click', () => done(null))
+    sendBtn.addEventListener('click', () => done({ prompt: ta.value.trim(), attachments: [...attachments] }))
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault()
+        done({ prompt: ta.value.trim(), attachments: [...attachments] })
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        done(null)
+      }
+    })
+
+    actions.append(cancelBtn, sendBtn)
+    box.append(title, chips, ta, attachRow, actions, hintEl)
+    shadow.appendChild(box)
+    ta.focus()
+  })
+}
+
+/** 批量发送：compareMode 开启且 ≥2 平台时当场输入问题，文本+截图一起并行提交并对比；关闭则完全原行为 */
 async function sendToSites(
   shadow: ShadowRoot,
   canvas: HTMLCanvasElement,
   siteIds: string[]
 ): Promise<void> {
-  const { aiList } = await loadSettings()
+  const { aiList, compareMode } = await loadSettings()
   const sites = siteIds
-    .map((id) => aiList.find((s) => s.id === id))
+    .map((id) => aiList.find((s) => s.id === id.replace(/^ai:/, '')))
     .filter((s): s is AiSite => !!s)
   if (!sites.length) return
+
+  // 对比模式唯一入口：开关开启 + ≥2 平台 → 当场弹输入框（问题/附件与截图一起发送）；取消则中止
+  // 开关关闭 → 无输入框、无文本提交、无对比面板，与原有批量行为完全一致
+  let prompt = ''
+  let attachments: CmpAttachment[] = []
+  const isCompare = compareMode === true && sites.length >= 2
+  if (isCompare) {
+    const input = await showComparePrompt(shadow, sites)
+    if (input === null) return
+    prompt = input.prompt
+    attachments = input.attachments
+  }
+
   toast(shadow, t(lang, 'toast.sending', { n: sites.length }))
-  for (const s of sites) {
-    await sendToAi(shadow, canvas, s)
+  // prompt 为空（用户留空）= 纯批量注入，不带对比上下文
+  const batch =
+    isCompare && prompt
+      ? {
+          aiIds: sites.map((s) => s.id),
+          batchKey: crypto.randomUUID(),
+          prompt,
+          ...(attachments.length ? { attachments } : {}),
+        }
+      : undefined
+  // 并行注入：各站互不依赖。串行时每站最长 ~60s（等页 + 粘贴验证），
+  // 6 站串行最坏数分钟——中途 SW 回收 / 用户切走页面会让后面几站直接丢发。
+  await Promise.all(sites.map((s) => sendToAi(shadow, canvas, s, batch)))
+  if (batch) {
+    try {
+      await chrome.runtime.sendMessage({ type: 'COMPARE_BATCH_DONE', batchKey: batch.batchKey })
+    } catch {
+      /* 忽略 */
+    }
   }
 }
 
@@ -457,37 +653,43 @@ async function startFullPageFlow() {
 
 // ---- 消息入口 ----
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.type === 'PING') {
-    sendResponse({ ok: true })
-    return
-  }
-  if (msg?.type === 'RUN_FLOW' || msg?.type === 'START_FLOW') {
-    sendResponse({ ok: true })
-    setTimeout(() => startFlow(), 80) // 等 popup 关闭、页面拿到焦点
-  }
-  if (msg?.type === 'RUN_FULLPAGE' || msg?.type === 'START_FULLPAGE') {
-    sendResponse({ ok: true })
-    setTimeout(() => startFullPageFlow(), 80)
-  }
-})
-
-// ---- 自定义快捷键（设置页配置，页面级监听） ----
-
-window.addEventListener(
-  'keydown',
-  (e) => {
-    if (!hotkey || active) return
-    // 输入场景不触发（输入框、可编辑元素）
-    const a = document.activeElement as HTMLElement | null
-    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable)) {
+// 注入幂等守卫：ensureContentScript 的 PING 假阴性会触发重复 executeScript，
+// 重复执行会注册双份监听器（RUN_FLOW 触发两次、快捷键双重响应）
+const win = window as unknown as { __orbitshotMainListener?: boolean }
+if (!win.__orbitshotMainListener) {
+  win.__orbitshotMainListener = true
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === 'PING') {
+      sendResponse({ ok: true })
       return
     }
-    if (comboFromEvent(e) === hotkey) {
-      e.preventDefault()
-      e.stopPropagation()
-      startFlow()
+    if (msg?.type === 'RUN_FLOW' || msg?.type === 'START_FLOW') {
+      sendResponse({ ok: true })
+      setTimeout(() => startFlow(), 80) // 等 popup 关闭、页面拿到焦点
     }
-  },
-  true
-)
+    if (msg?.type === 'RUN_FULLPAGE' || msg?.type === 'START_FULLPAGE') {
+      sendResponse({ ok: true })
+      setTimeout(() => startFullPageFlow(), 80)
+    }
+  })
+
+  // ---- 自定义快捷键（设置页配置，页面级监听） ----
+
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      if (!hotkey || active) return
+      // 输入场景不触发（输入框、可编辑元素）
+      const a = document.activeElement as HTMLElement | null
+      if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable)) {
+        return
+      }
+      if (comboFromEvent(e) === hotkey) {
+        e.preventDefault()
+        e.stopPropagation()
+        startFlow()
+      }
+    },
+    true
+  )
+}
